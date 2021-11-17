@@ -438,12 +438,18 @@ namespace Unity.Netcode
 
         private void SnapshotSpawn()
         {
+#region OOI_CC
+            MarkVariablesDirty();
+#endregion
             var command = GetSpawnCommand();
             NetworkManager.SnapshotSystem.Spawn(command);
         }
 
         private void SnapshotSpawn(ulong clientId)
         {
+#region OOI_CC
+            MarkVariablesDirty();
+#endregion
             var command = GetSpawnCommand();
             command.TargetClientIds = new List<ulong>();
             command.TargetClientIds.Add(clientId);

@@ -194,7 +194,9 @@ namespace Unity.Netcode
             return pos;
         }
 
-        internal List<ulong> GetClientList()
+#region OOI_CC
+        internal List<ulong> GetClientList(NetworkObject networkObject)
+#endregion
         {
             List<ulong> clientList;
             clientList = new List<ulong>();
@@ -207,7 +209,9 @@ namespace Unity.Netcode
             {
                 foreach (var clientId in ConnectedClientsId)
                 {
-                    if (clientId != m_NetworkManager.ServerClientId)
+#region OOI_CC
+                    if (clientId != m_NetworkManager.ServerClientId && networkObject.Observers.Contains(clientId))
+#endregion
                     {
                         clientList.Add(clientId);
                     }
@@ -230,7 +234,9 @@ namespace Unity.Netcode
             {
                 if (command.TargetClientIds == default)
                 {
-                    command.TargetClientIds = GetClientList();
+#region OOI_CC
+                    command.TargetClientIds = GetClientList(command.NetworkObject);
+#endregion
                 }
 
                 // todo: store, for each client, the spawn not ack'ed yet,
@@ -270,7 +276,9 @@ namespace Unity.Netcode
             {
                 if (command.TargetClientIds == default)
                 {
-                    command.TargetClientIds = GetClientList();
+#region OOI_CC
+                    command.TargetClientIds = GetClientList(command.NetworkObject);
+#endregion
                 }
                 if (command.TargetClientIds.Count > 0)
                 {

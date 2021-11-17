@@ -230,7 +230,9 @@ namespace Unity.Netcode
 
         internal void AddSpawnedNetworkObjects()
         {
+#region OOI_CC
             m_NetworkObjectsSync = m_NetworkManager.SpawnManager.SpawnedObjectsList.Where(x => x.Observers.Contains(TargetClientId)).ToList();
+#endregion
             m_NetworkObjectsSync.Sort(SortNetworkObjects);
         }
 
