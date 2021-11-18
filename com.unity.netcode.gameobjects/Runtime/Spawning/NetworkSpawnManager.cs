@@ -804,7 +804,9 @@ namespace Unity.Netcode
         {
             foreach (var sobj in SpawnedObjectsList)
             {
+#region OOI_CC
                 if (sobj.CheckObjectVisibility == null || NetworkManager.ServerClientId == clientId)
+#endregion
                 {
                     if (!sobj.Observers.Contains(clientId))
                     {
