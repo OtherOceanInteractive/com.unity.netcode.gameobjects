@@ -225,9 +225,8 @@ namespace Unity.Netcode
             }
         }
 
-#region OOI_CC
-        internal List<ulong> GetClientList(NetworkObject networkObject)
-#endregion
+        // returns the default client list: just the server, on clients, all clients, on the server
+        internal List<ulong> GetClientList()
         {
             List<ulong> clientList;
             clientList = new List<ulong>();
@@ -240,9 +239,7 @@ namespace Unity.Netcode
             {
                 foreach (var clientId in ConnectedClientsId)
                 {
-#region OOI_CC
-                    if (clientId != m_NetworkManager.ServerClientId && networkObject.Observers.Contains(clientId))
-#endregion
+                    if (clientId != m_NetworkManager.ServerClientId)
                     {
                         clientList.Add(clientId);
                     }
@@ -250,81 +247,6 @@ namespace Unity.Netcode
             }
 
             return clientList;
-        }
-
-        internal void AddSpawn(SnapshotSpawnCommand command)
-        {
-            if (NumSpawns >= SpawnsBufferCount)
-            {
-                Array.Resize(ref Spawns, 2 * SpawnsBufferCount);
-                SpawnsBufferCount = SpawnsBufferCount * 2;
-                // Debug.Log($"[JEFF] spawn size is now {m_MaxSpawns}");
-            }
-
-            if (NumSpawns < SpawnsBufferCount)
-            {
-                if (command.TargetClientIds == default)
-                {
-#region OOI_CC
-                    command.TargetClientIds = GetClientList(command.NetworkObject);
-#endregion
-                }
-
-                // todo: store, for each client, the spawn not ack'ed yet,
-                // to prevent sending despawns to them.
-                // for clientData in client list
-                // clientData.SpawnSet.Add(command.NetworkObjectId);
-
-                // todo:
-                // this 'if' might be temporary, but is needed to help in debugging
-                // or maybe it stays
-                if (command.TargetClientIds.Count > 0)
-                {
-                    Spawns[NumSpawns] = command;
-                    NumSpawns++;
-                }
-
-                if (m_NetworkManager)
-                {
-                    foreach (var dstClientId in command.TargetClientIds)
-                    {
-                        m_NetworkManager.NetworkMetrics.TrackObjectSpawnSent(dstClientId, command.NetworkObject, 8);
-                    }
-                }
-            }
-        }
-
-        internal void AddDespawn(SnapshotDespawnCommand command)
-        {
-            if (NumDespawns >= DespawnsBufferCount)
-            {
-                Array.Resize(ref Despawns, 2 * DespawnsBufferCount);
-                DespawnsBufferCount = DespawnsBufferCount * 2;
-                // Debug.Log($"[JEFF] despawn size is now {m_MaxDespawns}");
-            }
-
-            if (NumDespawns < DespawnsBufferCount)
-            {
-                if (command.TargetClientIds == default)
-                {
-#region OOI_CC
-                    command.TargetClientIds = GetClientList(command.NetworkObject);
-#endregion
-                }
-                if (command.TargetClientIds.Count > 0)
-                {
-                    Despawns[NumDespawns] = command;
-                    NumDespawns++;
-                }
-
-                if (m_NetworkManager)
-                {
-                    foreach (var dstClientId in command.TargetClientIds)
-                    {
-                        m_NetworkManager.NetworkMetrics.TrackObjectDestroySent(dstClientId, command.NetworkObject, 8);
-                    }
-                }
-            }
         }
 
         /// <summary>
