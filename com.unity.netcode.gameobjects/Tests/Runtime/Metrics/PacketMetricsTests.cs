@@ -5,20 +5,12 @@ using NUnit.Framework;
 using Unity.Collections;
 using Unity.Multiplayer.Tools.MetricTypes;
 using UnityEngine.TestTools;
-using Unity.Netcode.TestHelpers.Runtime;
 using Unity.Netcode.TestHelpers.Runtime.Metrics;
 
 namespace Unity.Netcode.RuntimeTests.Metrics
 {
     internal class PacketMetricsTests : SingleClientMetricTestBase
     {
-
-        protected override void OnOneTimeSetup()
-        {
-            m_NetworkTransport = NetcodeIntegrationTestHelpers.InstanceTransport.UTP;
-            base.OnOneTimeSetup();
-        }
-
         [UnityTest]
         public IEnumerator TrackPacketSentMetric()
         {

@@ -3,14 +3,18 @@ using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 using UnityEditorInternal;
+using Unity.Netcode.Editor.Configuration;
 
 namespace Unity.Netcode.Editor
 {
+    /// <summary>
+    /// This <see cref="CustomEditor"/> handles the translation between the <see cref="NetworkConfig"/> and
+    /// the <see cref="NetworkManager"/> properties.
+    /// </summary>
     [CustomEditor(typeof(NetworkManager), true)]
     [CanEditMultipleObjects]
     public class NetworkManagerEditor : UnityEditor.Editor
     {
-        internal const string InstallMultiplayerToolsTipDismissedPlayerPrefKey = "Netcode_Tip_InstallMPTools_Dismissed";
         private static GUIStyle s_CenteredWordWrappedLabelStyle;
         private static GUIStyle s_HelpBoxStyle;
 
@@ -200,6 +204,7 @@ namespace Unity.Netcode.Editor
             m_NetworkPrefabsList.drawHeaderCallback = rect => EditorGUI.LabelField(rect, "NetworkPrefabs");
         }
 
+        /// <inheritdoc/>
         public override void OnInspectorGUI()
         {
             Initialize();
@@ -208,18 +213,6 @@ namespace Unity.Netcode.Editor
 #if !MULTIPLAYER_TOOLS
             DrawInstallMultiplayerToolsTip();
 #endif
-
-            {
-                var iterator = serializedObject.GetIterator();
-
-                for (bool enterChildren = true; iterator.NextVisible(enterChildren); enterChildren = false)
-                {
-                    using (new EditorGUI.DisabledScope("m_Script" == iterator.propertyPath))
-                    {
-                        EditorGUILayout.PropertyField(iterator, false);
-                    }
-                }
-            }
 
             if (!m_NetworkManager.IsServer && !m_NetworkManager.IsClient)
             {
@@ -363,10 +356,10 @@ namespace Unity.Netcode.Editor
             const string getToolsText = "Access additional tools for multiplayer development by installing the Multiplayer Tools package in the Package Manager.";
             const string openDocsButtonText = "Open Docs";
             const string dismissButtonText = "Dismiss";
-            const string targetUrl = "https://docs-multiplayer.unity3d.com/docs/tools/install-tools";
+            const string targetUrl = "https://docs-multiplayer.unity3d.com/netcode/current/tools/install-tools";
             const string infoIconName = "console.infoicon";
 
-            if (PlayerPrefs.GetInt(InstallMultiplayerToolsTipDismissedPlayerPrefKey, 0) != 0)
+            if (NetcodeForGameObjectsSettings.GetNetcodeInstallMultiplayerToolTips() != 0)
             {
                 return;
             }
@@ -412,7 +405,7 @@ namespace Unity.Netcode.Editor
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button(dismissButtonText, dismissButtonStyle, GUILayout.ExpandWidth(false)))
                 {
-                    PlayerPrefs.SetInt(InstallMultiplayerToolsTipDismissedPlayerPrefKey, 1);
+                    NetcodeForGameObjectsSettings.SetNetcodeInstallMultiplayerToolTips(1);
                 }
                 EditorGUIUtility.AddCursorRect(GUILayoutUtility.GetLastRect(), MouseCursor.Link);
                 GUILayout.FlexibleSpace();

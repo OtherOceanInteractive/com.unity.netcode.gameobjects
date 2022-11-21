@@ -1,13 +1,29 @@
+// NetSim Implementation compilation boilerplate
+// All references to UNITY_MP_TOOLS_NETSIM_IMPLEMENTATION_ENABLED should be defined in the same way,
+// as any discrepancies are likely to result in build failures
+#if UNITY_EDITOR || (DEVELOPMENT_BUILD && !UNITY_MP_TOOLS_NETSIM_DISABLED_IN_DEVELOP) || (!DEVELOPMENT_BUILD && UNITY_MP_TOOLS_NETSIM_ENABLED_IN_RELEASE)
+#define UNITY_MP_TOOLS_NETSIM_IMPLEMENTATION_ENABLED
+#endif
+
 using System;
 using System.Collections.Generic;
 using UnityEngine;
 using NetcodeNetworkEvent = Unity.Netcode.NetworkEvent;
 using TransportNetworkEvent = Unity.Networking.Transport.NetworkEvent;
+using Unity.Burst;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Collections;
+using Unity.Jobs;
 using Unity.Networking.Transport;
 using Unity.Networking.Transport.Relay;
 using Unity.Networking.Transport.Utilities;
+#if UTP_TRANSPORT_2_0_ABOVE
+using Unity.Networking.Transport.TLS;
+#endif
+
+#if !UTP_TRANSPORT_2_0_ABOVE
+using NetworkEndpoint = Unity.Networking.Transport.NetworkEndPoint;
+#endif
 
 namespace Unity.Netcode.Transports.UTP
 {
@@ -16,6 +32,14 @@ namespace Unity.Netcode.Transports.UTP
     /// </summary>
     public interface INetworkStreamDriverConstructor
     {
+        /// <summary>
+        /// Creates the internal NetworkDriver
+        /// </summary>
+        /// <param name="transport">The owner transport</param>
+        /// <param name="driver">The driver</param>
+        /// <param name="unreliableFragmentedPipeline">The UnreliableFragmented NetworkPipeline</param>
+        /// <param name="unreliableSequencedFragmentedPipeline">The UnreliableSequencedFragmented NetworkPipeline</param>
+        /// <param name="reliableSequencedPipeline">The ReliableSequenced NetworkPipeline</param>
         void CreateDriver(
             UnityTransport transport,
             out NetworkDriver driver,
@@ -24,54 +48,75 @@ namespace Unity.Netcode.Transports.UTP
             out NetworkPipeline reliableSequencedPipeline);
     }
 
+    /// <summary>
+    /// Helper utility class to convert <see cref="Networking.Transport"/> error codes to human readable error messages.
+    /// </summary>
     public static class ErrorUtilities
     {
-        private const string k_NetworkSuccess = "Success";
-        private const string k_NetworkIdMismatch = "NetworkId is invalid, likely caused by stale connection {0}.";
-        private const string k_NetworkVersionMismatch = "NetworkVersion is invalid, likely caused by stale connection {0}.";
-        private const string k_NetworkStateMismatch = "Sending data while connecting on connection {0} is not allowed.";
-        private const string k_NetworkPacketOverflow = "Unable to allocate packet due to buffer overflow.";
-        private const string k_NetworkSendQueueFull = "Currently unable to queue packet as there is too many in-flight packets. This could be because the send queue size ('Max Send Queue Size') is too small.";
-        private const string k_NetworkHeaderInvalid = "Invalid Unity Transport Protocol header.";
-        private const string k_NetworkDriverParallelForErr = "The parallel network driver needs to process a single unique connection per job, processing a single connection multiple times in a parallel for is not supported.";
-        private const string k_NetworkSendHandleInvalid = "Invalid NetworkInterface Send Handle. Likely caused by pipeline send data corruption.";
-        private const string k_NetworkArgumentMismatch = "Invalid NetworkEndpoint Arguments.";
+        private static readonly FixedString128Bytes k_NetworkSuccess = "Success";
+        private static readonly FixedString128Bytes k_NetworkIdMismatch = "Invalid connection ID {0}.";
+        private static readonly FixedString128Bytes k_NetworkVersionMismatch = "Connection ID is invalid. Likely caused by sending on stale connection {0}.";
+        private static readonly FixedString128Bytes k_NetworkStateMismatch = "Connection state is invalid. Likely caused by sending on connection {0} which is stale or still connecting.";
+        private static readonly FixedString128Bytes k_NetworkPacketOverflow = "Packet is too large to be allocated by the transport.";
+        private static readonly FixedString128Bytes k_NetworkSendQueueFull = "Unable to queue packet in the transport. Likely caused by send queue size ('Max Send Queue Size') being too small.";
 
+        /// <summary>
+        /// Convert a UTP error code to human-readable error message.
+        /// </summary>
+        /// <param name="error">UTP error code.</param>
+        /// <param name="connectionId">ID of the connection on which the error occurred.</param>
+        /// <returns>Human-readable error message.</returns>
         public static string ErrorToString(Networking.Transport.Error.StatusCode error, ulong connectionId)
         {
-            switch (error)
+            return ErrorToString((int)error, connectionId);
+        }
+
+        internal static string ErrorToString(int error, ulong connectionId)
+        {
+            return ErrorToFixedString(error, connectionId).ToString();
+        }
+
+        internal static FixedString128Bytes ErrorToFixedString(int error, ulong connectionId)
+        {
+            switch ((Networking.Transport.Error.StatusCode)error)
             {
                 case Networking.Transport.Error.StatusCode.Success:
                     return k_NetworkSuccess;
                 case Networking.Transport.Error.StatusCode.NetworkIdMismatch:
-                    return string.Format(k_NetworkIdMismatch, connectionId);
+                    return FixedString.Format(k_NetworkIdMismatch, connectionId);
                 case Networking.Transport.Error.StatusCode.NetworkVersionMismatch:
-                    return string.Format(k_NetworkVersionMismatch, connectionId);
+                    return FixedString.Format(k_NetworkVersionMismatch, connectionId);
                 case Networking.Transport.Error.StatusCode.NetworkStateMismatch:
-                    return string.Format(k_NetworkStateMismatch, connectionId);
+                    return FixedString.Format(k_NetworkStateMismatch, connectionId);
                 case Networking.Transport.Error.StatusCode.NetworkPacketOverflow:
                     return k_NetworkPacketOverflow;
                 case Networking.Transport.Error.StatusCode.NetworkSendQueueFull:
                     return k_NetworkSendQueueFull;
-                case Networking.Transport.Error.StatusCode.NetworkHeaderInvalid:
-                    return k_NetworkHeaderInvalid;
-                case Networking.Transport.Error.StatusCode.NetworkDriverParallelForErr:
-                    return k_NetworkDriverParallelForErr;
-                case Networking.Transport.Error.StatusCode.NetworkSendHandleInvalid:
-                    return k_NetworkSendHandleInvalid;
-                case Networking.Transport.Error.StatusCode.NetworkArgumentMismatch:
-                    return k_NetworkArgumentMismatch;
+                default:
+                    return FixedString.Format("Unknown error code {0}.", error);
             }
-
-            return $"Unknown ErrorCode {Enum.GetName(typeof(Networking.Transport.Error.StatusCode), error)}";
         }
     }
 
+    /// <summary>
+    /// The Netcode for GameObjects NetworkTransport for UnityTransport.
+    /// Note: This is highly recommended to use over UNet.
+    /// </summary>
+    [AddComponentMenu("Netcode/Unity Transport")]
     public partial class UnityTransport : NetworkTransport, INetworkStreamDriverConstructor
     {
+        /// <summary>
+        /// Enum type stating the type of protocol
+        /// </summary>
         public enum ProtocolType
         {
+            /// <summary>
+            /// Unity Transport Protocol
+            /// </summary>
             UnityTransport,
+            /// <summary>
+            /// Unity Transport Protocol over Relay
+            /// </summary>
             RelayUnityTransport,
         }
 
@@ -82,20 +127,68 @@ namespace Unity.Netcode.Transports.UTP
             Connected,
         }
 
+        /// <summary>
+        /// The default maximum (receive) packet queue size
+        /// </summary>
         public const int InitialMaxPacketQueueSize = 128;
+
+        /// <summary>
+        /// The default maximum payload size
+        /// </summary>
         public const int InitialMaxPayloadSize = 6 * 1024;
+
+        /// <summary>
+        /// The default maximum send queue size
+        /// </summary>
+        [Obsolete("MaxSendQueueSize is now determined dynamically (can still be set programmatically using the MaxSendQueueSize property). This initial value is not used anymore.", false)]
         public const int InitialMaxSendQueueSize = 16 * InitialMaxPayloadSize;
+
+        // Maximum reliable throughput, assuming the full reliable window can be sent on every
+        // frame at 60 FPS. This will be a large over-estimation in any realistic scenario.
+        private const int k_MaxReliableThroughput = (NetworkParameterConstants.MTU * 32 * 60) / 1000; // bytes per millisecond
 
         private static ConnectionAddressData s_DefaultConnectionAddressData = new ConnectionAddressData { Address = "127.0.0.1", Port = 7777, ServerListenAddress = string.Empty };
 
 #pragma warning disable IDE1006 // Naming Styles
+
+        /// <summary>
+        /// The global <see cref="INetworkStreamDriverConstructor"/> implementation
+        /// </summary>
         public static INetworkStreamDriverConstructor s_DriverConstructor;
 #pragma warning restore IDE1006 // Naming Styles
+
+        /// <summary>
+        /// Returns either the global <see cref="INetworkStreamDriverConstructor"/> implementation or the current <see cref="UnityTransport"/> instance
+        /// </summary>
         public INetworkStreamDriverConstructor DriverConstructor => s_DriverConstructor ?? this;
 
         [Tooltip("Which protocol should be selected (Relay/Non-Relay).")]
         [SerializeField]
         private ProtocolType m_ProtocolType;
+
+#if UTP_TRANSPORT_2_0_ABOVE
+        [Tooltip("Per default the client/server will communicate over UDP. Set to true to communicate with WebSocket.")]
+        [SerializeField]
+        private bool m_UseWebSockets = false;
+
+        public bool UseWebSockets
+        {
+            get => m_UseWebSockets;
+            set => m_UseWebSockets = value;
+        }
+
+        /// <summary>
+        /// Per default the client/server communication will not be encrypted. Select true to enable DTLS for UDP and TLS for Websocket.
+        /// </summary>
+        [Tooltip("Per default the client/server communication will not be encrypted. Select true to enable DTLS for UDP and TLS for Websocket.")]
+        [SerializeField]
+        private bool m_UseEncryption = false;
+        public bool UseEncryption
+        {
+            get => m_UseEncryption;
+            set => m_UseEncryption = value;
+        }
+#endif
 
         [Tooltip("The maximum amount of packets that can be in the internal send/receive queues. Basically this is how many packets can be sent/received in a single update/frame.")]
         [SerializeField]
@@ -109,26 +202,28 @@ namespace Unity.Netcode.Transports.UTP
             set => m_MaxPacketQueueSize = value;
         }
 
-        [Tooltip("The maximum size of a payload that can be handled by the transport.")]
+        [Tooltip("The maximum size of an unreliable payload that can be handled by the transport.")]
         [SerializeField]
         private int m_MaxPayloadSize = InitialMaxPayloadSize;
 
-        /// <summary>The maximum size of a payload that can be handled by the transport.</summary>
+        /// <summary>The maximum size of an unreliable payload that can be handled by the transport.</summary>
         public int MaxPayloadSize
         {
             get => m_MaxPayloadSize;
             set => m_MaxPayloadSize = value;
         }
 
-        [Tooltip("The maximum size in bytes of the transport send queue. The send queue accumulates messages for batching and stores messages when other internal send queues are full. If you routinely observe an error about too many in-flight packets, try increasing this.")]
-        [SerializeField]
-        private int m_MaxSendQueueSize = InitialMaxSendQueueSize;
+        private int m_MaxSendQueueSize = 0;
 
         /// <summary>The maximum size in bytes of the transport send queue.</summary>
         /// <remarks>
         /// The send queue accumulates messages for batching and stores messages when other internal
-        /// send queues are full. If you routinely observe an error about too many in-flight packets,
-        /// try increasing this.
+        /// send queues are full. Note that there should not be any need to set this value manually
+        /// since the send queue size is dynamically sized based on need.
+        ///
+        /// This value should only be set if you have particular requirements (e.g. if you want to
+        /// limit the memory usage of the send queues). Note however that setting this value too low
+        /// can easily lead to disconnections under heavy traffic.
         /// </remarks>
         public int MaxSendQueueSize
         {
@@ -187,61 +282,122 @@ namespace Unity.Netcode.Transports.UTP
             set => m_DisconnectTimeoutMS = value;
         }
 
+        /// <summary>
+        /// Structure to store the address to connect to
+        /// </summary>
         [Serializable]
         public struct ConnectionAddressData
         {
+            /// <summary>
+            /// IP address of the server (address to which clients will connect to).
+            /// </summary>
             [Tooltip("IP address of the server (address to which clients will connect to).")]
             [SerializeField]
             public string Address;
 
+            /// <summary>
+            /// UDP port of the server.
+            /// </summary>
             [Tooltip("UDP port of the server.")]
             [SerializeField]
             public ushort Port;
 
+            /// <summary>
+            /// IP address the server will listen on. If not provided, will use 'Address'.
+            /// </summary>
             [Tooltip("IP address the server will listen on. If not provided, will use 'Address'.")]
             [SerializeField]
             public string ServerListenAddress;
 
-            private static NetworkEndPoint ParseNetworkEndpoint(string ip, ushort port)
+            private static NetworkEndpoint ParseNetworkEndpoint(string ip, ushort port)
             {
-                if (!NetworkEndPoint.TryParse(ip, port, out var endpoint))
+                NetworkEndpoint endpoint = default;
+
+                if (!NetworkEndpoint.TryParse(ip, port, out endpoint, NetworkFamily.Ipv4) &&
+                    !NetworkEndpoint.TryParse(ip, port, out endpoint, NetworkFamily.Ipv6))
                 {
                     Debug.LogError($"Invalid network endpoint: {ip}:{port}.");
-                    return default;
                 }
 
                 return endpoint;
             }
 
-            public NetworkEndPoint ServerEndPoint => ParseNetworkEndpoint(Address, Port);
+            /// <summary>
+            /// Endpoint (IP address and port) clients will connect to.
+            /// </summary>
+            public NetworkEndpoint ServerEndPoint => ParseNetworkEndpoint(Address, Port);
 
-            public NetworkEndPoint ListenEndPoint => ParseNetworkEndpoint((ServerListenAddress == string.Empty) ? Address : ServerListenAddress, Port);
+            /// <summary>
+            /// Endpoint (IP address and port) server will listen/bind on.
+            /// </summary>
+            public NetworkEndpoint ListenEndPoint => ParseNetworkEndpoint((ServerListenAddress?.Length == 0) ? Address : ServerListenAddress, Port);
         }
 
+        /// <summary>
+        /// The connection (address) data for this <see cref="UnityTransport"/> instance.
+        /// This is where you can change IP Address, Port, or server's listen address.
+        /// <see cref="ConnectionAddressData"/>
+        /// </summary>
         public ConnectionAddressData ConnectionData = s_DefaultConnectionAddressData;
 
+        /// <summary>
+        /// Parameters for the Network Simulator
+        /// </summary>
         [Serializable]
         public struct SimulatorParameters
         {
+            /// <summary>
+            /// Delay to add to every send and received packet (in milliseconds). Only applies in the editor and in development builds. The value is ignored in production builds.
+            /// </summary>
             [Tooltip("Delay to add to every send and received packet (in milliseconds). Only applies in the editor and in development builds. The value is ignored in production builds.")]
             [SerializeField]
             public int PacketDelayMS;
 
+            /// <summary>
+            /// Jitter (random variation) to add/substract to the packet delay (in milliseconds). Only applies in the editor and in development builds. The value is ignored in production builds.
+            /// </summary>
             [Tooltip("Jitter (random variation) to add/substract to the packet delay (in milliseconds). Only applies in the editor and in development builds. The value is ignored in production builds.")]
             [SerializeField]
             public int PacketJitterMS;
 
+            /// <summary>
+            /// Percentage of sent and received packets to drop. Only applies in the editor and in the editor and in developments builds.
+            /// </summary>
             [Tooltip("Percentage of sent and received packets to drop. Only applies in the editor and in the editor and in developments builds.")]
             [SerializeField]
             public int PacketDropRate;
         }
 
+        /// <summary>
+        /// Can be used to simulate poor network conditions such as:
+        /// - packet delay/latency
+        /// - packet jitter (variances in latency, see: https://en.wikipedia.org/wiki/Jitter)
+        /// - packet drop rate (packet loss)
+        /// </summary>
+#if UTP_TRANSPORT_2_0_ABOVE
+        [Obsolete("DebugSimulator is no longer supported and has no effect. Use Network Simulator from the Multiplayer Tools package.", false)]
+#endif
         public SimulatorParameters DebugSimulator = new SimulatorParameters
         {
             PacketDelayMS = 0,
             PacketJitterMS = 0,
             PacketDropRate = 0
         };
+
+        internal uint? DebugSimulatorRandomSeed { get; set; } = null;
+
+        private struct PacketLossCache
+        {
+            public int PacketsReceived;
+            public int PacketsDropped;
+            public float PacketLoss;
+        };
+
+        internal static event Action<int, NetworkDriver> TransportInitialized;
+        internal static event Action<int> TransportDisposed;
+        internal NetworkDriver NetworkDriver => m_Driver;
+
+        private PacketLossCache m_PacketLossCache = new PacketLossCache();
 
         private State m_State = State.Disconnected;
         private NetworkDriver m_Driver;
@@ -252,8 +408,14 @@ namespace Unity.Netcode.Transports.UTP
         private NetworkPipeline m_UnreliableSequencedFragmentedPipeline;
         private NetworkPipeline m_ReliableSequencedPipeline;
 
+        /// <summary>
+        /// The client id used to represent the server.
+        /// </summary>
         public override ulong ServerClientId => m_ServerClientId;
 
+        /// <summary>
+        /// The current ProtocolType used by the transport
+        /// </summary>
         public ProtocolType Protocol => m_ProtocolType;
 
         private RelayServerData m_RelayServerData;
@@ -278,6 +440,8 @@ namespace Unity.Netcode.Transports.UTP
                 out m_UnreliableFragmentedPipeline,
                 out m_UnreliableSequencedFragmentedPipeline,
                 out m_ReliableSequencedPipeline);
+
+            TransportInitialized?.Invoke(GetInstanceID(), NetworkDriver);
         }
 
         private void DisposeInternals()
@@ -295,6 +459,8 @@ namespace Unity.Netcode.Transports.UTP
             }
 
             m_SendQueue.Clear();
+
+            TransportDisposed?.Invoke(GetInstanceID());
         }
 
         private NetworkPipeline SelectSendPipeline(NetworkDelivery delivery)
@@ -320,7 +486,7 @@ namespace Unity.Netcode.Transports.UTP
 
         private bool ClientBindAndConnect()
         {
-            var serverEndpoint = default(NetworkEndPoint);
+            var serverEndpoint = default(NetworkEndpoint);
 
             if (m_ProtocolType == ProtocolType.RelayUnityTransport)
             {
@@ -333,6 +499,7 @@ namespace Unity.Netcode.Transports.UTP
                 }
 
                 m_NetworkSettings.WithRelayParameters(ref m_RelayServerData, m_HeartbeatTimeoutMS);
+                serverEndpoint = m_RelayServerData.Endpoint;
             }
             else
             {
@@ -341,7 +508,8 @@ namespace Unity.Netcode.Transports.UTP
 
             InitDriver();
 
-            int result = m_Driver.Bind(NetworkEndPoint.AnyIpv4);
+            var bindEndpoint = serverEndpoint.Family == NetworkFamily.Ipv6 ? NetworkEndpoint.AnyIpv6 : NetworkEndpoint.AnyIpv4;
+            int result = m_Driver.Bind(bindEndpoint);
             if (result != 0)
             {
                 Debug.LogError("Client failed to bind");
@@ -354,7 +522,7 @@ namespace Unity.Netcode.Transports.UTP
             return true;
         }
 
-        private bool ServerBindAndListen(NetworkEndPoint endPoint)
+        private bool ServerBindAndListen(NetworkEndpoint endPoint)
         {
             InitDriver();
 
@@ -376,84 +544,36 @@ namespace Unity.Netcode.Transports.UTP
             return true;
         }
 
-        private static RelayAllocationId ConvertFromAllocationIdBytes(byte[] allocationIdBytes)
-        {
-            unsafe
-            {
-                fixed (byte* ptr = allocationIdBytes)
-                {
-                    return RelayAllocationId.FromBytePointer(ptr, allocationIdBytes.Length);
-                }
-            }
-        }
-
-        private static RelayHMACKey ConvertFromHMAC(byte[] hmac)
-        {
-            unsafe
-            {
-                fixed (byte* ptr = hmac)
-                {
-                    return RelayHMACKey.FromBytePointer(ptr, RelayHMACKey.k_Length);
-                }
-            }
-        }
-
-        private static RelayConnectionData ConvertConnectionData(byte[] connectionData)
-        {
-            unsafe
-            {
-                fixed (byte* ptr = connectionData)
-                {
-                    return RelayConnectionData.FromBytePointer(ptr, RelayConnectionData.k_Length);
-                }
-            }
-        }
-
-        internal void SetMaxPayloadSize(int maxPayloadSize)
-        {
-            m_MaxPayloadSize = maxPayloadSize;
-        }
-
         private void SetProtocol(ProtocolType inProtocol)
         {
             m_ProtocolType = inProtocol;
         }
 
+        /// <summary>Set the relay server data for the server.</summary>
+        /// <param name="ipv4Address">IP address or hostname of the relay server.</param>
+        /// <param name="port">UDP port of the relay server.</param>
+        /// <param name="allocationIdBytes">Allocation ID as a byte array.</param>
+        /// <param name="keyBytes">Allocation key as a byte array.</param>
+        /// <param name="connectionDataBytes">Connection data as a byte array.</param>
+        /// <param name="hostConnectionDataBytes">The HostConnectionData as a byte array.</param>
+        /// <param name="isSecure">Whether the connection is secure (uses DTLS).</param>
         public void SetRelayServerData(string ipv4Address, ushort port, byte[] allocationIdBytes, byte[] keyBytes, byte[] connectionDataBytes, byte[] hostConnectionDataBytes = null, bool isSecure = false)
         {
-            RelayConnectionData hostConnectionData;
+            var hostConnectionData = hostConnectionDataBytes ?? connectionDataBytes;
+            m_RelayServerData = new RelayServerData(ipv4Address, port, allocationIdBytes, connectionDataBytes, hostConnectionData, keyBytes, isSecure);
+            SetProtocol(ProtocolType.RelayUnityTransport);
+        }
 
-            if (!NetworkEndPoint.TryParse(ipv4Address, port, out var serverEndpoint))
-            {
-                Debug.LogError($"Invalid address {ipv4Address}:{port}");
-
-                // We set this to default to cause other checks to fail to state you need to call this
-                // function again.
-                m_RelayServerData = default;
-                return;
-            }
-
-            var allocationId = ConvertFromAllocationIdBytes(allocationIdBytes);
-            var key = ConvertFromHMAC(keyBytes);
-            var connectionData = ConvertConnectionData(connectionDataBytes);
-
-            if (hostConnectionDataBytes != null)
-            {
-                hostConnectionData = ConvertConnectionData(hostConnectionDataBytes);
-            }
-            else
-            {
-                hostConnectionData = connectionData;
-            }
-
-            m_RelayServerData = new RelayServerData(ref serverEndpoint, 0, ref allocationId, ref connectionData, ref hostConnectionData, ref key, isSecure);
-            m_RelayServerData.ComputeNewNonce();
-
+        /// <summary>Set the relay server data (using the lower-level Unity Transport data structure).</summary>
+        /// <param name="serverData">Data for the Relay server to use.</param>
+        public void SetRelayServerData(RelayServerData serverData)
+        {
+            m_RelayServerData = serverData;
             SetProtocol(ProtocolType.RelayUnityTransport);
         }
 
         /// <summary>Set the relay server data for the host.</summary>
-        /// <param name="ipAddress">IP address of the relay server.</param>
+        /// <param name="ipAddress">IP address or hostname of the relay server.</param>
         /// <param name="port">UDP port of the relay server.</param>
         /// <param name="allocationId">Allocation ID as a byte array.</param>
         /// <param name="key">Allocation key as a byte array.</param>
@@ -465,7 +585,7 @@ namespace Unity.Netcode.Transports.UTP
         }
 
         /// <summary>Set the relay server data for the host.</summary>
-        /// <param name="ipAddress">IP address of the relay server.</param>
+        /// <param name="ipAddress">IP address or hostname of the relay server.</param>
         /// <param name="port">UDP port of the relay server.</param>
         /// <param name="allocationId">Allocation ID as a byte array.</param>
         /// <param name="key">Allocation key as a byte array.</param>
@@ -480,6 +600,9 @@ namespace Unity.Netcode.Transports.UTP
         /// <summary>
         /// Sets IP and Port information. This will be ignored if using the Unity Relay and you should call <see cref="SetRelayServerData"/>
         /// </summary>
+        /// <param name="ipv4Address">The remote IP address (despite the name, can be an IPv6 address)</param>
+        /// <param name="port">The remote port</param>
+        /// <param name="listenAddress">The local listen address</param>
         public void SetConnectionData(string ipv4Address, ushort port, string listenAddress = null)
         {
             ConnectionData = new ConnectionAddressData
@@ -495,7 +618,9 @@ namespace Unity.Netcode.Transports.UTP
         /// <summary>
         /// Sets IP and Port information. This will be ignored if using the Unity Relay and you should call <see cref="SetRelayServerData"/>
         /// </summary>
-        public void SetConnectionData(NetworkEndPoint endPoint, NetworkEndPoint listenEndPoint = default)
+        /// <param name="endPoint">The remote end point</param>
+        /// <param name="listenEndPoint">The local listen endpoint</param>
+        public void SetConnectionData(NetworkEndpoint endPoint, NetworkEndpoint listenEndPoint = default)
         {
             string serverAddress = endPoint.Address.Split(':')[0];
 
@@ -516,6 +641,9 @@ namespace Unity.Netcode.Transports.UTP
         /// <param name="packetDelay">Packet delay in milliseconds.</param>
         /// <param name="packetJitter">Packet jitter in milliseconds.</param>
         /// <param name="dropRate">Packet drop percentage.</param>
+#if UTP_TRANSPORT_2_0_ABOVE
+        [Obsolete("SetDebugSimulatorParameters is no longer supported and has no effect. Use Network Simulator from the Multiplayer Tools package.", false)]
+#endif
         public void SetDebugSimulatorParameters(int packetDelay, int packetJitter, int dropRate)
         {
             if (m_Driver.IsCreated)
@@ -544,57 +672,76 @@ namespace Unity.Netcode.Transports.UTP
             else
             {
                 m_NetworkSettings.WithRelayParameters(ref m_RelayServerData, m_HeartbeatTimeoutMS);
-                return ServerBindAndListen(NetworkEndPoint.AnyIpv4);
+                return ServerBindAndListen(NetworkEndpoint.AnyIpv4);
+            }
+        }
+
+        [BurstCompile]
+        private struct SendBatchedMessagesJob : IJob
+        {
+            public NetworkDriver.Concurrent Driver;
+            public SendTarget Target;
+            public BatchedSendQueue Queue;
+            public NetworkPipeline ReliablePipeline;
+
+            public void Execute()
+            {
+                var clientId = Target.ClientId;
+                var connection = ParseClientId(clientId);
+                var pipeline = Target.NetworkPipeline;
+
+                while (!Queue.IsEmpty)
+                {
+                    var result = Driver.BeginSend(pipeline, connection, out var writer);
+                    if (result != (int)Networking.Transport.Error.StatusCode.Success)
+                    {
+                        Debug.LogError($"Error sending message: {ErrorUtilities.ErrorToFixedString(result, clientId)}");
+                        return;
+                    }
+
+                    // We don't attempt to send entire payloads over the reliable pipeline. Instead we
+                    // fragment it manually. This is safe and easy to do since the reliable pipeline
+                    // basically implements a stream, so as long as we separate the different messages
+                    // in the stream (the send queue does that automatically) we are sure they'll be
+                    // reassembled properly at the other end. This allows us to lift the limit of ~44KB
+                    // on reliable payloads (because of the reliable window size).
+                    var written = pipeline == ReliablePipeline ? Queue.FillWriterWithBytes(ref writer) : Queue.FillWriterWithMessages(ref writer);
+
+                    result = Driver.EndSend(writer);
+                    if (result == written)
+                    {
+                        // Batched message was sent successfully. Remove it from the queue.
+                        Queue.Consume(written);
+                    }
+                    else
+                    {
+                        // Some error occured. If it's just the UTP queue being full, then don't log
+                        // anything since that's okay (the unsent message(s) are still in the queue
+                        // and we'll retry sending them later). Otherwise log the error and remove the
+                        // message from the queue (we don't want to resend it again since we'll likely
+                        // just get the same error again).
+                        if (result != (int)Networking.Transport.Error.StatusCode.NetworkSendQueueFull)
+                        {
+                            Debug.LogError($"Error sending the message: {ErrorUtilities.ErrorToFixedString(result, clientId)}");
+                            Queue.Consume(written);
+                        }
+
+                        return;
+                    }
+                }
             }
         }
 
         // Send as many batched messages from the queue as possible.
         private void SendBatchedMessages(SendTarget sendTarget, BatchedSendQueue queue)
         {
-            var clientId = sendTarget.ClientId;
-            var connection = ParseClientId(clientId);
-            var pipeline = sendTarget.NetworkPipeline;
-
-            while (!queue.IsEmpty)
+            new SendBatchedMessagesJob
             {
-                var result = m_Driver.BeginSend(pipeline, connection, out var writer);
-                if (result != (int)Networking.Transport.Error.StatusCode.Success)
-                {
-                    Debug.LogError("Error sending the message: " +
-                        ErrorUtilities.ErrorToString((Networking.Transport.Error.StatusCode)result, clientId));
-                    return;
-                }
-
-                // We don't attempt to send entire payloads over the reliable pipeline. Instead we
-                // fragment it manually. This is safe and easy to do since the reliable pipeline
-                // basically implements a stream, so as long as we separate the different messages
-                // in the stream (the send queue does that automatically) we are sure they'll be
-                // reassembled properly at the other end. This allows us to lift the limit of ~44KB
-                // on reliable payloads (because of the reliable window size).
-                var written = pipeline == m_ReliableSequencedPipeline ? queue.FillWriterWithBytes(ref writer) : queue.FillWriterWithMessages(ref writer);
-
-                result = m_Driver.EndSend(writer);
-                if (result == written)
-                {
-                    // Batched message was sent successfully. Remove it from the queue.
-                    queue.Consume(written);
-                }
-                else
-                {
-                    // Some error occured. If it's just the UTP queue being full, then don't log
-                    // anything since that's okay (the unsent message(s) are still in the queue
-                    // and we'll retry sending the later). Otherwise log the error and remove the
-                    // message from the queue (we don't want to resend it again since we'll likely
-                    // just get the same error again).
-                    if (result != (int)Networking.Transport.Error.StatusCode.NetworkSendQueueFull)
-                    {
-                        Debug.LogError("Error sending the message: " + ErrorUtilities.ErrorToString((Networking.Transport.Error.StatusCode)result, clientId));
-                        queue.Consume(written);
-                    }
-
-                    return;
-                }
-            }
+                Driver = m_Driver.ToConcurrent(),
+                Target = sendTarget,
+                Queue = queue,
+                ReliablePipeline = m_ReliableSequencedPipeline
+            }.Run();
         }
 
         private bool AcceptConnection()
@@ -713,6 +860,15 @@ namespace Unity.Netcode.Transports.UTP
 
                 m_Driver.ScheduleUpdate().Complete();
 
+                if (m_ProtocolType == ProtocolType.RelayUnityTransport && m_Driver.GetRelayConnectionStatus() == RelayConnectionStatus.AllocationInvalid)
+                {
+                    Debug.LogError("Transport failure! Relay allocation needs to be recreated, and NetworkManager restarted. " +
+                        "Use NetworkManager.OnTransportFailure to be notified of such events programmatically.");
+
+                    InvokeOnTransportEvent(NetcodeNetworkEvent.TransportFailure, 0, default, Time.realtimeSinceStartup);
+                    return;
+                }
+
                 while (AcceptConnection() && m_Driver.IsCreated)
                 {
                     ;
@@ -764,7 +920,7 @@ namespace Unity.Netcode.Transports.UTP
 
         private void ExtractNetworkMetricsForClient(ulong transportClientId)
         {
-            var networkConnection =  ParseClientId(transportClientId);
+            var networkConnection = ParseClientId(transportClientId);
             ExtractNetworkMetricsFromPipeline(m_UnreliableFragmentedPipeline, networkConnection);
             ExtractNetworkMetricsFromPipeline(m_UnreliableSequencedFragmentedPipeline, networkConnection);
             ExtractNetworkMetricsFromPipeline(m_ReliableSequencedPipeline, networkConnection);
@@ -780,7 +936,11 @@ namespace Unity.Netcode.Transports.UTP
         {
             //Don't need to dispose of the buffers, they are filled with data pointers.
             m_Driver.GetPipelineBuffers(pipeline,
+#if UTP_TRANSPORT_2_0_ABOVE
+                NetworkPipelineStageId.Get<NetworkMetricsPipelineStage>(),
+#else
                 NetworkPipelineStageCollection.GetStageId(typeof(NetworkMetricsPipelineStage)),
+#endif
                 networkConnection,
                 out _,
                 out _,
@@ -807,7 +967,11 @@ namespace Unity.Netcode.Transports.UTP
             }
 
             m_Driver.GetPipelineBuffers(m_ReliableSequencedPipeline,
+#if UTP_TRANSPORT_2_0_ABOVE
+                NetworkPipelineStageId.Get<ReliableSequencedPipelineStage>(),
+#else
                 NetworkPipelineStageCollection.GetStageId(typeof(ReliableSequencedPipelineStage)),
+#endif
                 networkConnection,
                 out _,
                 out _,
@@ -829,7 +993,11 @@ namespace Unity.Netcode.Transports.UTP
             }
 
             m_Driver.GetPipelineBuffers(m_ReliableSequencedPipeline,
+#if UTP_TRANSPORT_2_0_ABOVE
+                NetworkPipelineStageId.Get<ReliableSequencedPipelineStage>(),
+#else
                 NetworkPipelineStageCollection.GetStageId(typeof(ReliableSequencedPipelineStage)),
+#endif
                 networkConnection,
                 out _,
                 out _,
@@ -839,11 +1007,22 @@ namespace Unity.Netcode.Transports.UTP
             {
                 var sharedContext = (ReliableUtility.SharedContext*)sharedBuffer.GetUnsafePtr();
 
-                var packetReceived = (float)sharedContext->stats.PacketsReceived;
-                var packetDropped = (float)sharedContext->stats.PacketsDropped;
-                var packetLoss = packetReceived > 0 ? packetDropped / packetReceived : 0;
+                var packetReceivedDelta = (float)(sharedContext->stats.PacketsReceived - m_PacketLossCache.PacketsReceived);
+                var packetDroppedDelta = (float)(sharedContext->stats.PacketsDropped - m_PacketLossCache.PacketsDropped);
 
-                return packetLoss;
+                // There can be multiple update happening in a single frame where no packets have transitioned
+                // In those situation we want to return the last packet loss value instead of 0 to avoid invalid swings
+                if (packetDroppedDelta == 0 && packetReceivedDelta == 0)
+                {
+                    return m_PacketLossCache.PacketLoss;
+                }
+
+                m_PacketLossCache.PacketsReceived = sharedContext->stats.PacketsReceived;
+                m_PacketLossCache.PacketsDropped = sharedContext->stats.PacketsDropped;
+
+                m_PacketLossCache.PacketLoss = packetReceivedDelta > 0 ? packetDroppedDelta / packetReceivedDelta : 0;
+
+                return m_PacketLossCache.PacketLoss;
             }
         }
 
@@ -887,6 +1066,9 @@ namespace Unity.Netcode.Transports.UTP
             }
         }
 
+        /// <summary>
+        /// Disconnects the local client from the remote
+        /// </summary>
         public override void DisconnectLocalClient()
         {
             if (m_State == State.Connected)
@@ -911,6 +1093,10 @@ namespace Unity.Netcode.Transports.UTP
             }
         }
 
+        /// <summary>
+        /// Disconnects a remote client from the server
+        /// </summary>
+        /// <param name="clientId">The client to disconnect</param>
         public override void DisconnectRemoteClient(ulong clientId)
         {
             Debug.Assert(m_State == State.Listening, "DisconnectRemoteClient should be called on a listening server");
@@ -930,6 +1116,11 @@ namespace Unity.Netcode.Transports.UTP
             }
         }
 
+        /// <summary>
+        /// Gets the current RTT for a specific client
+        /// </summary>
+        /// <param name="clientId">The client RTT to get</param>
+        /// <returns>The RTT</returns>
         public override ulong GetCurrentRtt(ulong clientId)
         {
             // We don't know if this is getting called from inside NGO (which presumably knows to
@@ -950,6 +1141,10 @@ namespace Unity.Netcode.Transports.UTP
             return (ulong)ExtractRtt(ParseClientId(clientId));
         }
 
+        /// <summary>
+        /// Initializes the transport
+        /// </summary>
+        /// <param name="networkManager">The NetworkManager that initialized and owns the transport</param>
         public override void Initialize(NetworkManager networkManager = null)
         {
             Debug.Assert(sizeof(ulong) == UnsafeUtility.SizeOf<NetworkConnection>(), "Netcode connection id size does not match UTP connection id size");
@@ -963,14 +1158,22 @@ namespace Unity.Netcode.Transports.UTP
             // account for the overhead of its length when we store it in the send queue.
             var fragmentationCapacity = m_MaxPayloadSize + BatchedSendQueue.PerMessageOverhead;
 
-            m_NetworkSettings
-                .WithFragmentationStageParameters(payloadCapacity: fragmentationCapacity)
-                .WithBaselibNetworkInterfaceParameters(
-                    receiveQueueCapacity: m_MaxPacketQueueSize,
-                    sendQueueCapacity: m_MaxPacketQueueSize);
+            m_NetworkSettings.WithFragmentationStageParameters(payloadCapacity: fragmentationCapacity);
+#if !UTP_TRANSPORT_2_0_ABOVE
+            m_NetworkSettings.WithBaselibNetworkInterfaceParameters(
+                receiveQueueCapacity: m_MaxPacketQueueSize,
+                sendQueueCapacity: m_MaxPacketQueueSize);
+#endif
 #endif
         }
 
+        /// <summary>
+        /// Polls for incoming events, with an extra output parameter to report the precise time the event was received.
+        /// </summary>
+        /// <param name="clientId">The clientId this event is for</param>
+        /// <param name="payload">The incoming data payload</param>
+        /// <param name="receiveTime">The time the event was received, as reported by Time.realtimeSinceStartup.</param>
+        /// <returns>Returns the event type</returns>
         public override NetcodeNetworkEvent PollEvent(out ulong clientId, out ArraySegment<byte> payload, out float receiveTime)
         {
             clientId = default;
@@ -979,20 +1182,42 @@ namespace Unity.Netcode.Transports.UTP
             return NetcodeNetworkEvent.Nothing;
         }
 
+        /// <summary>
+        /// Send a payload to the specified clientId, data and networkDelivery.
+        /// </summary>
+        /// <param name="clientId">The clientId to send to</param>
+        /// <param name="payload">The data to send</param>
+        /// <param name="networkDelivery">The delivery type (QoS) to send data with</param>
         public override void Send(ulong clientId, ArraySegment<byte> payload, NetworkDelivery networkDelivery)
         {
-            if (payload.Count > m_MaxPayloadSize)
+            var pipeline = SelectSendPipeline(networkDelivery);
+
+            if (pipeline != m_ReliableSequencedPipeline && payload.Count > m_MaxPayloadSize)
             {
-                Debug.LogError($"Payload of size {payload.Count} larger than configured 'Max Payload Size' ({m_MaxPayloadSize}).");
+                Debug.LogError($"Unreliable payload of size {payload.Count} larger than configured 'Max Payload Size' ({m_MaxPayloadSize}).");
                 return;
             }
-
-            var pipeline = SelectSendPipeline(networkDelivery);
 
             var sendTarget = new SendTarget(clientId, pipeline);
             if (!m_SendQueue.TryGetValue(sendTarget, out var queue))
             {
-                queue = new BatchedSendQueue(Math.Max(m_MaxSendQueueSize, m_MaxPayloadSize));
+                // The maximum size of a send queue is determined according to the disconnection
+                // timeout. The idea being that if the send queue contains enough reliable data that
+                // sending it all out would take longer than the disconnection timeout, then there's
+                // no point storing even more in the queue (it would be like having a ping higher
+                // than the disconnection timeout, which is far into the realm of unplayability).
+                //
+                // The throughput used to determine what consists the maximum send queue size is
+                // the maximum theoritical throughput of the reliable pipeline assuming we only send
+                // on each update at 60 FPS, which turns out to be around 2.688 MB/s.
+                //
+                // Note that we only care about reliable throughput for send queues because that's
+                // the only case where a full send queue causes a connection loss. Full unreliable
+                // send queues are dealt with by flushing it out to the network or simply dropping
+                // new messages if that fails.
+                var maxCapacity = m_MaxSendQueueSize > 0 ? m_MaxSendQueueSize : m_DisconnectTimeoutMS * k_MaxReliableThroughput;
+
+                queue = new BatchedSendQueue(Math.Max(maxCapacity, m_MaxPayloadSize));
                 m_SendQueue.Add(sendTarget, queue);
             }
 
@@ -1006,8 +1231,7 @@ namespace Unity.Netcode.Transports.UTP
 
                     var ngoClientId = NetworkManager?.TransportIdToClientId(clientId) ?? clientId;
                     Debug.LogError($"Couldn't add payload of size {payload.Count} to reliable send queue. " +
-                        $"Closing connection {ngoClientId} as reliability guarantees can't be maintained. " +
-                        $"Perhaps 'Max Send Queue Size' ({m_MaxSendQueueSize}) is too small for workload.");
+                        $"Closing connection {ngoClientId} as reliability guarantees can't be maintained.");
 
                     if (clientId == m_ServerClientId)
                     {
@@ -1040,6 +1264,14 @@ namespace Unity.Netcode.Transports.UTP
             }
         }
 
+        /// <summary>
+        /// Connects client to the server
+        /// Note:
+        /// When this method returns false it could mean:
+        /// - You are trying to start a client that is already started
+        /// - It failed during the initial port binding when attempting to begin to connect
+        /// </summary>
+        /// <returns>true if the client was started and false if it failed to start the client</returns>
         public override bool StartClient()
         {
             if (m_Driver.IsCreated)
@@ -1047,9 +1279,22 @@ namespace Unity.Netcode.Transports.UTP
                 return false;
             }
 
-            return ClientBindAndConnect();
+            var succeeded = ClientBindAndConnect();
+            if (!succeeded && m_Driver.IsCreated)
+            {
+                m_Driver.Dispose();
+            }
+            return succeeded;
         }
 
+        /// <summary>
+        /// Starts to listening for incoming clients
+        /// Note:
+        /// When this method returns false it could mean:
+        /// - You are trying to start a client that is already started
+        /// - It failed during the initial port binding when attempting to begin to connect
+        /// </summary>
+        /// <returns>true if the server was started and false if it failed to start the server</returns>
         public override bool StartServer()
         {
             if (m_Driver.IsCreated)
@@ -1057,17 +1302,31 @@ namespace Unity.Netcode.Transports.UTP
                 return false;
             }
 
+            bool succeeded;
             switch (m_ProtocolType)
             {
                 case ProtocolType.UnityTransport:
-                    return ServerBindAndListen(ConnectionData.ListenEndPoint);
+                    succeeded = ServerBindAndListen(ConnectionData.ListenEndPoint);
+                    if (!succeeded && m_Driver.IsCreated)
+                    {
+                        m_Driver.Dispose();
+                    }
+                    return succeeded;
                 case ProtocolType.RelayUnityTransport:
-                    return StartRelayServer();
+                    succeeded = StartRelayServer();
+                    if (!succeeded && m_Driver.IsCreated)
+                    {
+                        m_Driver.Dispose();
+                    }
+                    return succeeded;
                 default:
                     return false;
             }
         }
 
+        /// <summary>
+        /// Shuts down the transport
+        /// </summary>
         public override void Shutdown()
         {
             if (!m_Driver.IsCreated)
@@ -1083,52 +1342,204 @@ namespace Unity.Netcode.Transports.UTP
                 SendBatchedMessages(kvp.Key, kvp.Value);
             }
 
-            // The above flush only puts the message in UTP internal buffers, need the flush send
-            // job to execute to actually get things out on the wire. This will also ensure any
-            // disconnect messages are sent out.
-            m_Driver.ScheduleFlushSend(default).Complete();
+            // The above flush only puts the message in UTP internal buffers, need an update to
+            // actually get the messages on the wire. (Normally a flush send would be sufficient,
+            // but there might be disconnect messages and those require an update call.)
+            m_Driver.ScheduleUpdate().Complete();
 
             DisposeInternals();
+
+            m_ReliableReceiveQueues.Clear();
 
             // We must reset this to zero because UTP actually re-uses clientIds if there is a clean disconnect
             m_ServerClientId = 0;
         }
 
-        private void ConfigureSimulator()
+#if UTP_TRANSPORT_2_0_ABOVE
+        private void ConfigureSimulatorForUtp2()
+        {
+            // As DebugSimulator is deprecated, the 'packetDelayMs', 'packetJitterMs' and 'packetDropPercentage'
+            // parameters are set to the default and are supposed to be changed using Network Simulator tool instead.
+            m_NetworkSettings.WithSimulatorStageParameters(
+                maxPacketCount: 300, // TODO Is there any way to compute a better value?
+                maxPacketSize: NetworkParameterConstants.MTU,
+                packetDelayMs: 0,
+                packetJitterMs: 0,
+                packetDropPercentage: 0,
+                randomSeed: DebugSimulatorRandomSeed ?? (uint)System.Diagnostics.Stopwatch.GetTimestamp()
+                , mode: ApplyMode.AllPackets
+            );
+
+            m_NetworkSettings.WithNetworkSimulatorParameters();
+        }
+#else
+        private void ConfigureSimulatorForUtp1()
         {
             m_NetworkSettings.WithSimulatorStageParameters(
                 maxPacketCount: 300, // TODO Is there any way to compute a better value?
                 maxPacketSize: NetworkParameterConstants.MTU,
                 packetDelayMs: DebugSimulator.PacketDelayMS,
                 packetJitterMs: DebugSimulator.PacketJitterMS,
-                packetDropPercentage: DebugSimulator.PacketDropRate
+                packetDropPercentage: DebugSimulator.PacketDropRate,
+                randomSeed: DebugSimulatorRandomSeed ?? (uint)System.Diagnostics.Stopwatch.GetTimestamp()
             );
         }
+#endif
 
+        private string m_ServerPrivateKey;
+        private string m_ServerCertificate;
+
+        private string m_ServerCommonName;
+        private string m_ClientCaCertificate;
+
+        /// <summary>Set the server parameters for encryption.</summary>
+        /// <param name="serverCertificate">Public certificate for the server (PEM format).</param>
+        /// <param name="serverPrivateKey">Private key for the server (PEM format).</param>
+        public void SetServerSecrets(string serverCertificate, string serverPrivateKey)
+        {
+            m_ServerPrivateKey = serverPrivateKey;
+            m_ServerCertificate = serverCertificate;
+        }
+
+        /// <summary>Set the client parameters for encryption.</summary>
+        /// <remarks>
+        /// If the CA certificate is not provided, validation will be done against the OS/browser
+        /// certificate store. This is what you'd want if using certificates from a known provider.
+        /// For self-signed certificates, the CA certificate needs to be provided.
+        /// </remarks>
+        /// <param name="serverCommonName">Common name of the server (typically hostname).</param>
+        /// <param name="caCertificate">CA certificate used to validate the server's authenticity.</param>
+        public void SetClientSecrets(string serverCommonName, string caCertificate = null)
+        {
+            m_ServerCommonName = serverCommonName;
+            m_ClientCaCertificate = caCertificate;
+        }
+
+        /// <summary>
+        /// Creates the internal NetworkDriver
+        /// </summary>
+        /// <param name="transport">The owner transport</param>
+        /// <param name="driver">The driver</param>
+        /// <param name="unreliableFragmentedPipeline">The UnreliableFragmented NetworkPipeline</param>
+        /// <param name="unreliableSequencedFragmentedPipeline">The UnreliableSequencedFragmented NetworkPipeline</param>
+        /// <param name="reliableSequencedPipeline">The ReliableSequenced NetworkPipeline</param>
         public void CreateDriver(UnityTransport transport, out NetworkDriver driver,
             out NetworkPipeline unreliableFragmentedPipeline,
             out NetworkPipeline unreliableSequencedFragmentedPipeline,
             out NetworkPipeline reliableSequencedPipeline)
         {
-#if MULTIPLAYER_TOOLS_1_0_0_PRE_7
+#if MULTIPLAYER_TOOLS_1_0_0_PRE_7 && !UTP_TRANSPORT_2_0_ABOVE
             NetworkPipelineStageCollection.RegisterPipelineStage(new NetworkMetricsPipelineStage());
 #endif
-            var maxFrameTimeMS = 0;
 
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            maxFrameTimeMS = 100;
-            ConfigureSimulator();
+#if UTP_TRANSPORT_2_0_ABOVE && UNITY_MP_TOOLS_NETSIM_IMPLEMENTATION_ENABLED
+            ConfigureSimulatorForUtp2();
+#elif !UTP_TRANSPORT_2_0_ABOVE && (UNITY_EDITOR || DEVELOPMENT_BUILD)
+            ConfigureSimulatorForUtp1();
 #endif
 
             m_NetworkSettings.WithNetworkConfigParameters(
                 maxConnectAttempts: transport.m_MaxConnectAttempts,
                 connectTimeoutMS: transport.m_ConnectTimeoutMS,
                 disconnectTimeoutMS: transport.m_DisconnectTimeoutMS,
-                heartbeatTimeoutMS: transport.m_HeartbeatTimeoutMS,
-                maxFrameTimeMS: maxFrameTimeMS);
+#if UTP_TRANSPORT_2_0_ABOVE
+                sendQueueCapacity: m_MaxPacketQueueSize,
+                receiveQueueCapacity: m_MaxPacketQueueSize,
+#endif
+                heartbeatTimeoutMS: transport.m_HeartbeatTimeoutMS);
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+            if (NetworkManager.IsServer)
+            {
+                throw new Exception("WebGL as a server is not supported by Unity Transport, outside the Editor.");
+            }
+#endif
+
+#if UTP_TRANSPORT_2_0_ABOVE
+            if (m_UseEncryption)
+            {
+                if (m_ProtocolType == ProtocolType.RelayUnityTransport)
+                {
+                    if (m_RelayServerData.IsSecure == 0)
+                    {
+                        // log an error because we have mismatched configuration
+                        Debug.LogError("Mismatched security configuration, between Relay and local NetworkManager settings");
+                    }
+
+                    // No need to to anything else if using Relay because UTP will handle the
+                    // configuration of the security parameters on its own.
+                }
+                else
+                {
+                    if (NetworkManager.IsServer)
+                    {
+                        if (String.IsNullOrEmpty(m_ServerCertificate) || String.IsNullOrEmpty(m_ServerPrivateKey))
+                        {
+                            throw new Exception("In order to use encrypted communications, when hosting, you must set the server certificate and key.");
+                        }
+
+                        m_NetworkSettings.WithSecureServerParameters(m_ServerCertificate, m_ServerPrivateKey);
+                    }
+                    else
+                    {
+                        if (String.IsNullOrEmpty(m_ServerCommonName))
+                        {
+                            throw new Exception("In order to use encrypted communications, clients must set the server common name.");
+                        }
+                        else if (String.IsNullOrEmpty(m_ClientCaCertificate))
+                        {
+                            m_NetworkSettings.WithSecureClientParameters(m_ServerCommonName);
+                        }
+                        else
+                        {
+                            m_NetworkSettings.WithSecureClientParameters(m_ClientCaCertificate, m_ServerCommonName);
+                        }
+                    }
+                }
+            }
+#endif
+
+#if UTP_TRANSPORT_2_0_ABOVE
+            if (m_UseWebSockets)
+            {
+                driver = NetworkDriver.Create(new WebSocketNetworkInterface(), m_NetworkSettings);
+            }
+            else
+            {
+#if UNITY_WEBGL
+                Debug.LogWarning($"WebSockets were used even though they're not selected in NetworkManager. You should check {nameof(UseWebSockets)}', on the Unity Transport component, to silence this warning.");
+                driver = NetworkDriver.Create(new WebSocketNetworkInterface(), m_NetworkSettings);
+#else
+                driver = NetworkDriver.Create(new UDPNetworkInterface(), m_NetworkSettings);
+#endif
+            }
+#else
             driver = NetworkDriver.Create(m_NetworkSettings);
+#endif
 
+#if MULTIPLAYER_TOOLS_1_0_0_PRE_7 && UTP_TRANSPORT_2_0_ABOVE
+            driver.RegisterPipelineStage(new NetworkMetricsPipelineStage());
+#endif
+
+#if !UTP_TRANSPORT_2_0_ABOVE
+            SetupPipelinesForUtp1(driver,
+                out unreliableFragmentedPipeline,
+                out unreliableSequencedFragmentedPipeline,
+                out reliableSequencedPipeline);
+#else
+            SetupPipelinesForUtp2(driver,
+                out unreliableFragmentedPipeline,
+                out unreliableSequencedFragmentedPipeline,
+                out reliableSequencedPipeline);
+#endif
+        }
+
+#if !UTP_TRANSPORT_2_0_ABOVE
+        private void SetupPipelinesForUtp1(NetworkDriver driver,
+            out NetworkPipeline unreliableFragmentedPipeline,
+            out NetworkPipeline unreliableSequencedFragmentedPipeline,
+            out NetworkPipeline reliableSequencedPipeline)
+        {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (DebugSimulator.PacketDelayMS > 0 || DebugSimulator.PacketDropRate > 0)
             {
@@ -1146,7 +1557,7 @@ namespace Unity.Netcode.Transports.UTP
                     typeof(SimulatorPipelineStage),
                     typeof(SimulatorPipelineStageInSend)
 #if MULTIPLAYER_TOOLS_1_0_0_PRE_7
-                    ,typeof(NetworkMetricsPipelineStage)
+                    , typeof(NetworkMetricsPipelineStage)
 #endif
                 );
                 reliableSequencedPipeline = driver.CreatePipeline(
@@ -1154,7 +1565,7 @@ namespace Unity.Netcode.Transports.UTP
                     typeof(SimulatorPipelineStage),
                     typeof(SimulatorPipelineStageInSend)
 #if MULTIPLAYER_TOOLS_1_0_0_PRE_7
-                    ,typeof(NetworkMetricsPipelineStage)
+                    , typeof(NetworkMetricsPipelineStage)
 #endif
                 );
             }
@@ -1164,25 +1575,63 @@ namespace Unity.Netcode.Transports.UTP
                 unreliableFragmentedPipeline = driver.CreatePipeline(
                     typeof(FragmentationPipelineStage)
 #if MULTIPLAYER_TOOLS_1_0_0_PRE_7
-                    ,typeof(NetworkMetricsPipelineStage)
+                    , typeof(NetworkMetricsPipelineStage)
 #endif
                 );
                 unreliableSequencedFragmentedPipeline = driver.CreatePipeline(
                     typeof(FragmentationPipelineStage),
                     typeof(UnreliableSequencedPipelineStage)
 #if MULTIPLAYER_TOOLS_1_0_0_PRE_7
-                    ,typeof(NetworkMetricsPipelineStage)
+                    , typeof(NetworkMetricsPipelineStage)
 #endif
                 );
                 reliableSequencedPipeline = driver.CreatePipeline(
                     typeof(ReliableSequencedPipelineStage)
 #if MULTIPLAYER_TOOLS_1_0_0_PRE_7
-                    ,typeof(NetworkMetricsPipelineStage)
+                    , typeof(NetworkMetricsPipelineStage)
 #endif
                 );
             }
         }
+#else
+        private void SetupPipelinesForUtp2(NetworkDriver driver,
+            out NetworkPipeline unreliableFragmentedPipeline,
+            out NetworkPipeline unreliableSequencedFragmentedPipeline,
+            out NetworkPipeline reliableSequencedPipeline)
+        {
 
+            unreliableFragmentedPipeline = driver.CreatePipeline(
+                typeof(FragmentationPipelineStage)
+#if UNITY_MP_TOOLS_NETSIM_IMPLEMENTATION_ENABLED
+                , typeof(SimulatorPipelineStage)
+#endif
+#if MULTIPLAYER_TOOLS_1_0_0_PRE_7
+                , typeof(NetworkMetricsPipelineStage)
+#endif
+            );
+
+            unreliableSequencedFragmentedPipeline = driver.CreatePipeline(
+                typeof(FragmentationPipelineStage),
+                typeof(UnreliableSequencedPipelineStage)
+#if UNITY_MP_TOOLS_NETSIM_IMPLEMENTATION_ENABLED
+                , typeof(SimulatorPipelineStage)
+#endif
+#if MULTIPLAYER_TOOLS_1_0_0_PRE_7
+                , typeof(NetworkMetricsPipelineStage)
+#endif
+            );
+
+            reliableSequencedPipeline = driver.CreatePipeline(
+                typeof(ReliableSequencedPipelineStage)
+#if UNITY_MP_TOOLS_NETSIM_IMPLEMENTATION_ENABLED
+                , typeof(SimulatorPipelineStage)
+#endif
+#if MULTIPLAYER_TOOLS_1_0_0_PRE_7
+                , typeof(NetworkMetricsPipelineStage)
+#endif
+            );
+        }
+#endif
         // -------------- Utility Types -------------------------------------------------------------------------------
 
 

@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using NUnit.Framework;
@@ -8,16 +9,69 @@ using Unity.Netcode.TestHelpers.Runtime;
 
 namespace TestProject.RuntimeTests
 {
+    public struct TemplatedType<T1> : INetworkSerializeByMemcpy where T1 : unmanaged
+    {
+        public enum Enum
+        {
+            One,
+            Two,
+            Three
+        }
+
+        public struct NestedTemplatedType<T2> : INetworkSerializeByMemcpy where T2 : unmanaged
+        {
+            public T1 Value1;
+            public T2 Value2;
+        }
+
+        public T1 Value;
+    }
+    public struct NetworkSerializableTemplatedType<T1> : INetworkSerializable where T1 : unmanaged, IComparable, IConvertible, IComparable<T1>, IEquatable<T1>
+    {
+        public struct NestedTemplatedType<T2> : INetworkSerializable where T2 : unmanaged, IComparable, IConvertible, IComparable<T2>, IEquatable<T2>
+        {
+            public T1 Value1;
+            public T2 Value2;
+
+            public void NetworkSerialize<TImplementation>(BufferSerializer<TImplementation> serializer) where TImplementation : IReaderWriter
+            {
+                serializer.SerializeValue(ref Value1);
+                serializer.SerializeValue(ref Value2);
+            }
+        }
+
+        public T1 Value;
+
+        public void NetworkSerialize<TImplementation>(BufferSerializer<TImplementation> serializer) where TImplementation : IReaderWriter
+        {
+            serializer.SerializeValue(ref Value);
+        }
+    }
     public class RpcUserSerializableTypesTest : NetcodeIntegrationTest
     {
         private UserSerializableClass m_UserSerializableClass;
         private UserSerializableStruct m_UserSerializableStruct;
+
+        private TemplatedType<int> m_T1Val;
+        private TemplatedType<int>.NestedTemplatedType<int> m_T2Val;
+        private TemplatedType<int>.Enum m_EnumVal;
+        private NetworkSerializableTemplatedType<int> m_NetworkSerializableT1Val;
+        private NetworkSerializableTemplatedType<int>.NestedTemplatedType<int> m_NetworkSerializableT2Val;
+
+        private TemplatedType<int>[] m_T1Vals;
+        private TemplatedType<int>.NestedTemplatedType<int>[] m_T2Vals;
+        private TemplatedType<int>.Enum[] m_EnumVals;
+        private NetworkSerializableTemplatedType<int>[] m_NetworkSerializableT1Vals;
+        private NetworkSerializableTemplatedType<int>.NestedTemplatedType<int>[] m_NetworkSerializableT2Vals;
+
         private List<UserSerializableClass> m_UserSerializableClassArray;
         private List<UserSerializableStruct> m_UserSerializableStructArray;
 
         private bool m_FinishedTest;
         private bool m_FinishedStructTest;
         private bool m_FinishedClassTest;
+        private bool m_FinishedTemplateStructTest;
+        private bool m_FinishedNetworkSerializableTemplateStructTest;
 
         private bool m_IsSendingNull;
         private bool m_IsArrayEmpty;
@@ -39,6 +93,8 @@ namespace TestProject.RuntimeTests
             m_FinishedTest = false;
             m_FinishedStructTest = false;
             m_FinishedClassTest = false;
+            m_FinishedTemplateStructTest = false;
+            m_FinishedNetworkSerializableTemplateStructTest = false;
             var startTime = Time.realtimeSinceStartup;
 
             CreateServerAndClients();
@@ -52,6 +108,9 @@ namespace TestProject.RuntimeTests
             var clientSideNetworkBehaviourClass = clientClientPlayerResult.Result.gameObject.GetComponent<TestSerializationComponent>();
             clientSideNetworkBehaviourClass.OnSerializableClassUpdated = OnClientReceivedUserSerializableClassUpdated;
             clientSideNetworkBehaviourClass.OnSerializableStructUpdated = OnClientReceivedUserSerializableStructUpdated;
+            clientSideNetworkBehaviourClass.OnTemplateStructUpdated = OnClientReceivedUserSerializableTemplateStructUpdated;
+            clientSideNetworkBehaviourClass.OnNetworkSerializableTemplateStructUpdated = OnClientReceivedUserSerializableNetworkSerializableTemplateStructUpdated; clientSideNetworkBehaviourClass.OnTemplateStructsUpdated = OnClientReceivedUserSerializableTemplateStructsUpdated;
+            clientSideNetworkBehaviourClass.OnNetworkSerializableTemplateStructsUpdated = OnClientReceivedUserSerializableNetworkSerializableTemplateStructsUpdated;
 
 
             var userSerializableClass = new UserSerializableClass();
@@ -68,8 +127,24 @@ namespace TestProject.RuntimeTests
             userSerializableStruct.MyintValue = 1;
             userSerializableStruct.MyulongValue = 100;
 
+            var t1val = new TemplatedType<int> { Value = 1 };
+            var t2val = new TemplatedType<int>.NestedTemplatedType<int> { Value1 = 1, Value2 = 2 };
+            var networkSerializableT1val = new NetworkSerializableTemplatedType<int> { Value = 1 };
+            var networkSerializableT2val = new NetworkSerializableTemplatedType<int>.NestedTemplatedType<int> { Value1 = 1, Value2 = 2 };
+            var enumVal = TemplatedType<int>.Enum.One;
+
+            var t1vals = new[] { t1val };
+            var t2vals = new[] { t2val };
+            var networkSerializableT1vals = new[] { networkSerializableT1val };
+            var networkSerializableT2vals = new[] { networkSerializableT2val };
+            var enumVals = new[] { enumVal };
+
             clientSideNetworkBehaviourClass.ClientStartTest(userSerializableClass);
             clientSideNetworkBehaviourClass.ClientStartTest(userSerializableStruct);
+            clientSideNetworkBehaviourClass.ClientStartTest(t1val, t2val, enumVal);
+            clientSideNetworkBehaviourClass.ClientStartTest(networkSerializableT1val, networkSerializableT2val);
+            clientSideNetworkBehaviourClass.ClientStartTest(t1vals, t2vals, enumVals);
+            clientSideNetworkBehaviourClass.ClientStartTest(networkSerializableT1vals, networkSerializableT2vals);
 
             // Wait until the test has finished or we time out
             var timeOutPeriod = Time.realtimeSinceStartup + 5;
@@ -101,6 +176,22 @@ namespace TestProject.RuntimeTests
             Assert.AreEqual(m_UserSerializableStruct.MyintValue, userSerializableStruct.MyintValue + 1);
             Assert.AreEqual(m_UserSerializableStruct.MyulongValue, userSerializableStruct.MyulongValue + 1);
 
+            Assert.AreEqual(m_T1Val.Value, t1val.Value + 1);
+            Assert.AreEqual(m_T2Val.Value1, t2val.Value1 + 1);
+            Assert.AreEqual(m_T2Val.Value2, t2val.Value2 + 1);
+            Assert.AreEqual(m_NetworkSerializableT1Val.Value, networkSerializableT1val.Value + 1);
+            Assert.AreEqual(m_NetworkSerializableT2Val.Value1, networkSerializableT2val.Value1 + 1);
+            Assert.AreEqual(m_NetworkSerializableT2Val.Value2, networkSerializableT2val.Value2 + 1);
+            Assert.AreEqual(m_EnumVal, enumVal + 1);
+
+            Assert.AreEqual(m_T1Vals[0].Value, t1val.Value + 1);
+            Assert.AreEqual(m_T2Vals[0].Value1, t2val.Value1 + 1);
+            Assert.AreEqual(m_T2Vals[0].Value2, t2val.Value2 + 1);
+            Assert.AreEqual(m_NetworkSerializableT1Vals[0].Value, networkSerializableT1val.Value + 1);
+            Assert.AreEqual(m_NetworkSerializableT2Vals[0].Value1, networkSerializableT2val.Value1 + 1);
+            Assert.AreEqual(m_NetworkSerializableT2Vals[0].Value2, networkSerializableT2val.Value2 + 1);
+            Assert.AreEqual(m_EnumVals[0], enumVal + 1);
+
             // End of test
             ShutdownAndCleanUp();
         }
@@ -113,6 +204,10 @@ namespace TestProject.RuntimeTests
         public IEnumerator ExtensionMethodRpcTest()
         {
             m_FinishedTest = false;
+            m_FinishedStructTest = false;
+            m_FinishedClassTest = false;
+            m_FinishedTemplateStructTest = false;
+            m_FinishedNetworkSerializableTemplateStructTest = false;
             var startTime = Time.realtimeSinceStartup;
             CreateServerAndClients();
             m_PlayerPrefab.AddComponent<TestSerializationComponent>();
@@ -130,19 +225,24 @@ namespace TestProject.RuntimeTests
             var obj = new MyObject(256);
             var obj2 = new MySharedObjectReferencedById(256);
             var obj3 = new MyObjectPassedWithThisRef(256);
+            var intList = new List<int> { 5, 10, 15, 5, 1 };
+            var strList = new List<string> { "foo", "bar", "baz", "qux" };
             bool clientMyObjCalled = false;
             bool clientMyObjPassedWithThisRefCalled = false;
-            bool clientMySharedObjCalled = true;
+            bool clientMySharedObjCalled = false;
             bool serverMyObjCalled = false;
             bool serverMyObjPassedWithThisRefCalled = false;
-            bool serverMySharedObjCalled = true;
+            bool serverMySharedObjCalled = false;
+            bool serverIntListCalled = false;
+            bool serverStrListCalled = false;
             clientSideNetworkBehaviourClass.OnMyObjectUpdated = (receivedObj) =>
             {
                 Assert.AreEqual(obj.I, receivedObj.I);
                 Assert.AreNotSame(obj, receivedObj);
                 clientMyObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             serverSideNetworkBehaviourClass.OnMyObjectUpdated = (receivedObj) =>
             {
@@ -150,7 +250,8 @@ namespace TestProject.RuntimeTests
                 Assert.AreNotSame(obj, receivedObj);
                 serverMyObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             clientSideNetworkBehaviourClass.OnMyObjectPassedWithThisRefUpdated = (receivedObj) =>
             {
@@ -158,7 +259,8 @@ namespace TestProject.RuntimeTests
                 Assert.AreNotSame(obj, receivedObj);
                 clientMyObjPassedWithThisRefCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             serverSideNetworkBehaviourClass.OnMyObjectPassedWithThisRefUpdated = (receivedObj) =>
             {
@@ -166,26 +268,55 @@ namespace TestProject.RuntimeTests
                 Assert.AreNotSame(obj, receivedObj);
                 serverMyObjPassedWithThisRefCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             clientSideNetworkBehaviourClass.OnMySharedObjectReferencedByIdUpdated = (receivedObj) =>
             {
                 Assert.AreSame(obj2, receivedObj);
                 clientMySharedObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             serverSideNetworkBehaviourClass.OnMySharedObjectReferencedByIdUpdated = (receivedObj) =>
             {
                 Assert.AreSame(obj2, receivedObj);
                 serverMySharedObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
+            };
+            serverSideNetworkBehaviourClass.OnIntListUpdated = (receivedList) =>
+            {
+                Assert.AreEqual(intList.Count, receivedList.Count);
+                for (var i = 0; i < receivedList.Count; ++i)
+                {
+                    Assert.AreEqual(intList[i], receivedList[i]);
+                }
+                serverIntListCalled = true;
+                m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
+            };
+            serverSideNetworkBehaviourClass.OnStringListUpdated = (receivedList) =>
+            {
+                Assert.AreEqual(strList.Count, receivedList.Count);
+                for (var i = 0; i < receivedList.Count; ++i)
+                {
+                    Assert.AreEqual(strList[i], receivedList[i]);
+                }
+                serverStrListCalled = true;
+                m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
 
             clientSideNetworkBehaviourClass.SendMyObjectServerRpc(obj);
             clientSideNetworkBehaviourClass.SendMySharedObjectReferencedByIdServerRpc(obj2);
             clientSideNetworkBehaviourClass.SendMyObjectPassedWithThisRefServerRpc(obj3);
+            clientSideNetworkBehaviourClass.SendIntListServerRpc(intList);
+            clientSideNetworkBehaviourClass.SendStringListServerRpc(strList);
 
             // Wait until the test has finished or we time out
             var timeOutPeriod = Time.realtimeSinceStartup + 5;
@@ -234,12 +365,16 @@ namespace TestProject.RuntimeTests
             var objs = new[] { new MyObject(256), new MyObject(512) };
             var objs2 = new[] { new MySharedObjectReferencedById(256), new MySharedObjectReferencedById(512) };
             var objs3 = new[] { new MyObjectPassedWithThisRef(256), new MyObjectPassedWithThisRef(512) };
+            var intList = new[] { new List<int> { 5, 10, 15 }, new List<int> { 5, 1 } };
+            var strList = new[] { new List<string> { "foo", "bar" }, new List<string> { "baz", "qux" }, new List<string> { "quuz" } };
             bool clientMyObjCalled = false;
             bool clientMyObjPassedWithThisRefCalled = false;
-            bool clientMySharedObjCalled = true;
+            bool clientMySharedObjCalled = false;
             bool serverMyObjCalled = false;
             bool serverMyObjPassedWithThisRefCalled = false;
-            bool serverMySharedObjCalled = true;
+            bool serverMySharedObjCalled = false;
+            bool serverIntListCalled = false;
+            bool serverStrListCalled = false;
             clientSideNetworkBehaviourClass.OnMyObjectUpdated = (receivedObjs) =>
             {
                 Assert.AreEqual(receivedObjs.Length, objs2.Length);
@@ -250,7 +385,8 @@ namespace TestProject.RuntimeTests
                 }
                 clientMyObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             serverSideNetworkBehaviourClass.OnMyObjectUpdated = (receivedObjs) =>
             {
@@ -262,7 +398,8 @@ namespace TestProject.RuntimeTests
                 }
                 serverMyObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             clientSideNetworkBehaviourClass.OnMyObjectPassedWithThisRefUpdated = (receivedObjs) =>
             {
@@ -274,7 +411,8 @@ namespace TestProject.RuntimeTests
                 }
                 clientMyObjPassedWithThisRefCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             serverSideNetworkBehaviourClass.OnMyObjectPassedWithThisRefUpdated = (receivedObjs) =>
             {
@@ -286,7 +424,8 @@ namespace TestProject.RuntimeTests
                 }
                 serverMyObjPassedWithThisRefCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             clientSideNetworkBehaviourClass.OnMySharedObjectReferencedByIdUpdated = (receivedObjs) =>
             {
@@ -297,7 +436,8 @@ namespace TestProject.RuntimeTests
                 }
                 clientMySharedObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
             serverSideNetworkBehaviourClass.OnMySharedObjectReferencedByIdUpdated = (receivedObjs) =>
             {
@@ -308,12 +448,47 @@ namespace TestProject.RuntimeTests
                 }
                 serverMySharedObjCalled = true;
                 m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
-                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled;
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
+            };
+            serverSideNetworkBehaviourClass.OnIntListUpdated = (receivedLists) =>
+            {
+                Assert.AreEqual(receivedLists.Length, intList.Length);
+                for (var i = 0; i < receivedLists.Length; ++i)
+                {
+                    Assert.AreEqual(receivedLists[i].Count, intList[i].Count);
+                    for (var j = 0; j < receivedLists[i].Count; ++j)
+                    {
+                        Assert.AreEqual(intList[i][j], receivedLists[i][j]);
+                    }
+                }
+                serverIntListCalled = true;
+                m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
+            };
+            serverSideNetworkBehaviourClass.OnStringListUpdated = (receivedLists) =>
+            {
+                Assert.AreEqual(receivedLists.Length, strList.Length);
+                for (var i = 0; i < receivedLists.Length; ++i)
+                {
+                    Assert.AreEqual(receivedLists[i].Count, strList[i].Count);
+                    for (var j = 0; j < receivedLists[i].Count; ++j)
+                    {
+                        Assert.AreEqual(strList[i][j], receivedLists[i][j]);
+                    }
+                }
+                serverStrListCalled = true;
+                m_FinishedTest = clientMyObjCalled && clientMySharedObjCalled && clientMyObjPassedWithThisRefCalled &&
+                                 serverMyObjCalled && serverMySharedObjCalled && serverMyObjPassedWithThisRefCalled &&
+                                 serverIntListCalled && serverStrListCalled;
             };
 
             clientSideNetworkBehaviourClass.SendMyObjectServerRpc(objs);
             clientSideNetworkBehaviourClass.SendMySharedObjectReferencedByIdServerRpc(objs2);
             clientSideNetworkBehaviourClass.SendMyObjectPassedWithThisRefServerRpc(objs3);
+            clientSideNetworkBehaviourClass.SendIntListServerRpc(intList);
+            clientSideNetworkBehaviourClass.SendStringListServerRpc(strList);
 
             // Wait until the test has finished or we time out
             var timeOutPeriod = Time.realtimeSinceStartup + 5;
@@ -344,7 +519,7 @@ namespace TestProject.RuntimeTests
         {
             m_UserSerializableClass = userSerializableClass;
             m_FinishedClassTest = true;
-            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest;
+            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest && m_FinishedTemplateStructTest && m_FinishedNetworkSerializableTemplateStructTest;
         }
 
         /// <summary>
@@ -355,7 +530,41 @@ namespace TestProject.RuntimeTests
         {
             m_UserSerializableStruct = userSerializableStruct;
             m_FinishedStructTest = true;
-            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest;
+            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest && m_FinishedTemplateStructTest && m_FinishedNetworkSerializableTemplateStructTest;
+        }
+
+        private void OnClientReceivedUserSerializableTemplateStructUpdated(TemplatedType<int> t1val, TemplatedType<int>.NestedTemplatedType<int> t2val, TemplatedType<int>.Enum enumVal)
+        {
+            m_T1Val = t1val;
+            m_T2Val = t2val;
+            m_EnumVal = enumVal;
+            m_FinishedTemplateStructTest = true;
+            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest && m_FinishedTemplateStructTest && m_FinishedNetworkSerializableTemplateStructTest;
+        }
+
+        private void OnClientReceivedUserSerializableNetworkSerializableTemplateStructUpdated(NetworkSerializableTemplatedType<int> t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int> t2val)
+        {
+            m_NetworkSerializableT1Val = t1val;
+            m_NetworkSerializableT2Val = t2val;
+            m_FinishedNetworkSerializableTemplateStructTest = true;
+            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest && m_FinishedTemplateStructTest && m_FinishedNetworkSerializableTemplateStructTest;
+        }
+
+        private void OnClientReceivedUserSerializableTemplateStructsUpdated(TemplatedType<int>[] t1val, TemplatedType<int>.NestedTemplatedType<int>[] t2val, TemplatedType<int>.Enum[] enumVal)
+        {
+            m_T1Vals = t1val;
+            m_T2Vals = t2val;
+            m_EnumVals = enumVal;
+            m_FinishedTemplateStructTest = true;
+            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest && m_FinishedTemplateStructTest && m_FinishedNetworkSerializableTemplateStructTest;
+        }
+
+        private void OnClientReceivedUserSerializableNetworkSerializableTemplateStructsUpdated(NetworkSerializableTemplatedType<int>[] t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int>[] t2val)
+        {
+            m_NetworkSerializableT1Vals = t1val;
+            m_NetworkSerializableT2Vals = t2val;
+            m_FinishedNetworkSerializableTemplateStructTest = true;
+            m_FinishedTest = m_FinishedClassTest && m_FinishedStructTest && m_FinishedTemplateStructTest && m_FinishedNetworkSerializableTemplateStructTest;
         }
 
         /// <summary>
@@ -589,11 +798,28 @@ namespace TestProject.RuntimeTests
         public delegate void OnSerializableStructUpdatedDelgateHandler(UserSerializableStruct userSerializableStruct);
         public OnSerializableStructUpdatedDelgateHandler OnSerializableStructUpdated;
 
+        public delegate void OnTemplateStructUpdatedDelgateHandler(TemplatedType<int> t1val, TemplatedType<int>.NestedTemplatedType<int> t2val, TemplatedType<int>.Enum enumVal);
+        public OnTemplateStructUpdatedDelgateHandler OnTemplateStructUpdated;
+
+        public delegate void OnNetworkSerializableTemplateStructUpdatedDelgateHandler(NetworkSerializableTemplatedType<int> t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int> t2val);
+        public OnNetworkSerializableTemplateStructUpdatedDelgateHandler OnNetworkSerializableTemplateStructUpdated;
+
+        public delegate void OnTemplateStructsUpdatedDelgateHandler(TemplatedType<int>[] t1val, TemplatedType<int>.NestedTemplatedType<int>[] t2val, TemplatedType<int>.Enum[] enumVal);
+        public OnTemplateStructsUpdatedDelgateHandler OnTemplateStructsUpdated;
+
+        public delegate void OnNetworkSerializableTemplateStructsUpdatedDelgateHandler(NetworkSerializableTemplatedType<int>[] t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int>[] t2val);
+        public OnNetworkSerializableTemplateStructsUpdatedDelgateHandler OnNetworkSerializableTemplateStructsUpdated;
+
         public delegate void OnMySharedObjectReferencedByIdUpdatedDelgateHandler(MySharedObjectReferencedById obj);
         public OnMySharedObjectReferencedByIdUpdatedDelgateHandler OnMySharedObjectReferencedByIdUpdated;
 
         public delegate void OnMyObjectUpdatedDelgateHandler(MyObject obj);
         public OnMyObjectUpdatedDelgateHandler OnMyObjectUpdated;
+
+        public delegate void OnIntListUpdatedDelgateHandler(List<int> lst);
+        public OnIntListUpdatedDelgateHandler OnIntListUpdated;
+        public delegate void OnStringListUpdatedDelgateHandler(List<string> lst);
+        public OnStringListUpdatedDelgateHandler OnStringListUpdated;
 
         public delegate void OnMyObjectPassedWithThisRefUpdatedDelgateHandler(MyObjectPassedWithThisRef obj);
         public OnMyObjectPassedWithThisRefUpdatedDelgateHandler OnMyObjectPassedWithThisRefUpdated;
@@ -642,6 +868,113 @@ namespace TestProject.RuntimeTests
             }
         }
 
+        public void ClientStartTest(TemplatedType<int> t1val, TemplatedType<int>.NestedTemplatedType<int> t2val, TemplatedType<int>.Enum enumVal)
+        {
+            SendTemplateStructServerRpc(t1val, t2val, enumVal);
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        private void SendTemplateStructServerRpc(TemplatedType<int> t1val, TemplatedType<int>.NestedTemplatedType<int> t2val, TemplatedType<int>.Enum enumVal)
+        {
+            Debug.Log($"Received server RPC values {t1val.Value} {t2val.Value1} {t2val.Value2} {enumVal}");
+            t1val.Value++;
+            t2val.Value1++;
+            t2val.Value2++;
+            enumVal += 1;
+
+            SendTemplateStructClientRpc(t1val, t2val, enumVal);
+        }
+
+        [ClientRpc]
+        private void SendTemplateStructClientRpc(TemplatedType<int> t1val, TemplatedType<int>.NestedTemplatedType<int> t2val, TemplatedType<int>.Enum enumVal)
+        {
+            Debug.Log($"Received client RPC values {t1val.Value} {t2val.Value1} {t2val.Value2}");
+            if (OnTemplateStructUpdated != null)
+            {
+                OnTemplateStructUpdated.Invoke(t1val, t2val, enumVal);
+            }
+        }
+
+        public void ClientStartTest(NetworkSerializableTemplatedType<int> t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int> t2val)
+        {
+            SendNetworkSerializableTemplateStructServerRpc(t1val, t2val);
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        private void SendNetworkSerializableTemplateStructServerRpc(NetworkSerializableTemplatedType<int> t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int> t2val)
+        {
+            Debug.Log($"Received NetworkSerializable server RPC values {t1val.Value} {t2val.Value1} {t2val.Value2}");
+            t1val.Value++;
+            t2val.Value1++;
+            t2val.Value2++;
+
+            SendNetworkSerializableTemplateStructClientRpc(t1val, t2val);
+        }
+
+        [ClientRpc]
+        private void SendNetworkSerializableTemplateStructClientRpc(NetworkSerializableTemplatedType<int> t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int> t2val)
+        {
+            Debug.Log($"Received NetworkSerializable client RPC values {t1val.Value} {t2val.Value1} {t2val.Value2}");
+            if (OnNetworkSerializableTemplateStructUpdated != null)
+            {
+                OnNetworkSerializableTemplateStructUpdated.Invoke(t1val, t2val);
+            }
+        }
+
+
+        public void ClientStartTest(TemplatedType<int>[] t1val, TemplatedType<int>.NestedTemplatedType<int>[] t2val, TemplatedType<int>.Enum[] enumVal)
+        {
+            SendTemplateStructServerRpc(t1val, t2val, enumVal);
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        private void SendTemplateStructServerRpc(TemplatedType<int>[] t1val, TemplatedType<int>.NestedTemplatedType<int>[] t2val, TemplatedType<int>.Enum[] enumVal)
+        {
+            Debug.Log($"Received server RPC values {t1val[0].Value} {t2val[0].Value1} {t2val[0].Value2} {enumVal[0]}");
+            t1val[0].Value++;
+            t2val[0].Value1++;
+            t2val[0].Value2++;
+            enumVal[0] += 1;
+
+            SendTemplateStructClientRpc(t1val, t2val, enumVal);
+        }
+
+        [ClientRpc]
+        private void SendTemplateStructClientRpc(TemplatedType<int>[] t1val, TemplatedType<int>.NestedTemplatedType<int>[] t2val, TemplatedType<int>.Enum[] enumVal)
+        {
+            Debug.Log($"Received client RPC values {t1val[0].Value} {t2val[0].Value1} {t2val[0].Value2}");
+            if (OnTemplateStructsUpdated != null)
+            {
+                OnTemplateStructsUpdated.Invoke(t1val, t2val, enumVal);
+            }
+        }
+
+        public void ClientStartTest(NetworkSerializableTemplatedType<int>[] t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int>[] t2val)
+        {
+            SendNetworkSerializableTemplateStructServerRpc(t1val, t2val);
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        private void SendNetworkSerializableTemplateStructServerRpc(NetworkSerializableTemplatedType<int>[] t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int>[] t2val)
+        {
+            Debug.Log($"Received NetworkSerializable server RPC values {t1val[0].Value} {t2val[0].Value1} {t2val[0].Value2}");
+            t1val[0].Value++;
+            t2val[0].Value1++;
+            t2val[0].Value2++;
+
+            SendNetworkSerializableTemplateStructClientRpc(t1val, t2val);
+        }
+
+        [ClientRpc]
+        private void SendNetworkSerializableTemplateStructClientRpc(NetworkSerializableTemplatedType<int>[] t1val, NetworkSerializableTemplatedType<int>.NestedTemplatedType<int>[] t2val)
+        {
+            Debug.Log($"Received NetworkSerializable client RPC values {t1val[0].Value} {t2val[0].Value1} {t2val[0].Value2}");
+            if (OnNetworkSerializableTemplateStructsUpdated != null)
+            {
+                OnNetworkSerializableTemplateStructsUpdated.Invoke(t1val, t2val);
+            }
+        }
+
         /// <summary>
         /// Starts the unit test and passes the UserSerializableStruct from the client to the server
         /// </summary>
@@ -686,6 +1019,22 @@ namespace TestProject.RuntimeTests
             }
         }
         [ClientRpc]
+        public void SendIntListClientRpc(List<int> lst)
+        {
+            if (OnIntListUpdated != null)
+            {
+                OnIntListUpdated.Invoke(lst);
+            }
+        }
+        [ClientRpc]
+        public void SendStringListClientRpc(List<string> lst)
+        {
+            if (OnStringListUpdated != null)
+            {
+                OnStringListUpdated.Invoke(lst);
+            }
+        }
+        [ClientRpc]
         public void SendMyObjectPassedWithThisRefClientRpc(MyObjectPassedWithThisRef obj)
         {
             if (OnMyObjectPassedWithThisRefUpdated != null)
@@ -711,6 +1060,26 @@ namespace TestProject.RuntimeTests
                 OnMyObjectUpdated.Invoke(obj);
             }
             SendMyObjectClientRpc(obj);
+        }
+
+        [ServerRpc]
+        public void SendIntListServerRpc(List<int> lst)
+        {
+            if (OnIntListUpdated != null)
+            {
+                OnIntListUpdated.Invoke(lst);
+            }
+            SendIntListClientRpc(lst);
+        }
+
+        [ServerRpc]
+        public void SendStringListServerRpc(List<string> lst)
+        {
+            if (OnStringListUpdated != null)
+            {
+                OnStringListUpdated.Invoke(lst);
+            }
+            SendStringListClientRpc(lst);
         }
 
         [ServerRpc]
@@ -750,6 +1119,10 @@ namespace TestProject.RuntimeTests
 
         public delegate void OnMyObjectUpdatedDelgateHandler(MyObject[] obj);
         public OnMyObjectUpdatedDelgateHandler OnMyObjectUpdated;
+        public delegate void OnIntListUpdatedDelgateHandler(List<int>[] obj);
+        public OnIntListUpdatedDelgateHandler OnIntListUpdated;
+        public delegate void OnStringListUpdatedDelgateHandler(List<string>[] obj);
+        public OnStringListUpdatedDelgateHandler OnStringListUpdated;
         public delegate void OnMyObjectPassedWithThisRefUpdatedDelgateHandler(MyObjectPassedWithThisRef[] obj);
         public OnMyObjectPassedWithThisRefUpdatedDelgateHandler OnMyObjectPassedWithThisRefUpdated;
 
@@ -846,6 +1219,24 @@ namespace TestProject.RuntimeTests
         }
 
         [ClientRpc]
+        public void SendIntListClientRpc(List<int>[] lists)
+        {
+            if (OnIntListUpdated != null)
+            {
+                OnIntListUpdated.Invoke(lists);
+            }
+        }
+
+        [ClientRpc]
+        public void SendStringListClientRpc(List<string>[] lists)
+        {
+            if (OnStringListUpdated != null)
+            {
+                OnStringListUpdated.Invoke(lists);
+            }
+        }
+
+        [ClientRpc]
         public void SendMyObjectPassedWithThisRefClientRpc(MyObjectPassedWithThisRef[] objs)
         {
             if (OnMyObjectPassedWithThisRefUpdated != null)
@@ -871,6 +1262,26 @@ namespace TestProject.RuntimeTests
                 OnMyObjectUpdated.Invoke(objs);
             }
             SendMyObjectClientRpc(objs);
+        }
+
+        [ServerRpc]
+        public void SendIntListServerRpc(List<int>[] lists)
+        {
+            if (OnIntListUpdated != null)
+            {
+                OnIntListUpdated.Invoke(lists);
+            }
+            SendIntListClientRpc(lists);
+        }
+
+        [ServerRpc]
+        public void SendStringListServerRpc(List<string>[] lists)
+        {
+            if (OnStringListUpdated != null)
+            {
+                OnStringListUpdated.Invoke(lists);
+            }
+            SendStringListClientRpc(lists);
         }
 
         [ServerRpc]
@@ -1011,6 +1422,7 @@ namespace TestProject.RuntimeTests
         {
             writer.WriteValueSafe(value.I);
         }
+
         public static void ReadValueSafe(this FastBufferReader reader, out MyObject[] values)
         {
             reader.ReadValueSafe(out int length);
@@ -1018,6 +1430,112 @@ namespace TestProject.RuntimeTests
             for (var i = 0; i < length; ++i)
             {
                 reader.ReadValueSafe(out values[i]);
+            }
+        }
+
+        public static void ReadValueSafe(this FastBufferReader reader, out List<int> value)
+        {
+            reader.ReadValueSafe(out int length);
+            value = new List<int>();
+            for (var i = 0; i < length; ++i)
+            {
+                reader.ReadValueSafe(out int val);
+                value.Add(val);
+            }
+        }
+
+        //Serialization write for a List of ints
+        public static void WriteValueSafe(this FastBufferWriter writer, in List<int> value)
+        {
+            writer.WriteValueSafe(value.Count);
+            foreach (var item in value)
+            {
+                writer.WriteValueSafe(item);
+            }
+        }
+
+        //Serialization read for a List of strings
+        public static void ReadValueSafe(this FastBufferReader reader, out List<string> value)
+        {
+            reader.ReadValueSafe(out int length);
+            value = new List<string>();
+            for (var i = 0; i < length; ++i)
+            {
+                reader.ReadValueSafe(out string val);
+                value.Add(val);
+            }
+        }
+
+        //Serialization write for a List of strings
+        public static void WriteValueSafe(this FastBufferWriter writer, in List<string> value)
+        {
+            writer.WriteValueSafe(value.Count);
+            foreach (var item in value)
+            {
+                writer.WriteValueSafe(item);
+            }
+        }
+
+        public static void ReadValueSafe(this FastBufferReader reader, out List<int>[] value)
+        {
+            reader.ReadValueSafe(out int length);
+            value = new List<int>[length];
+            for (var i = 0; i < length; ++i)
+            {
+                reader.ReadValueSafe(out int oneLength);
+
+                value[i] = new List<int>();
+                for (var j = 0; j < oneLength; ++j)
+                {
+                    reader.ReadValueSafe(out int val);
+                    value[i].Add(val);
+                }
+            }
+        }
+
+        //Serialization write for a List of ints
+        public static void WriteValueSafe(this FastBufferWriter writer, in List<int>[] value)
+        {
+            writer.WriteValueSafe(value.Length);
+            foreach (var item in value)
+            {
+                writer.WriteValueSafe(item.Count);
+                foreach (var subItem in item)
+                {
+                    writer.WriteValueSafe(subItem);
+                }
+            }
+        }
+
+        //Serialization read for a List of strings
+        public static void ReadValueSafe(this FastBufferReader reader, out List<string>[] value)
+        {
+            reader.ReadValueSafe(out int length);
+            value = new List<string>[length];
+            for (var i = 0; i < length; ++i)
+            {
+                reader.ReadValueSafe(out int oneLength);
+
+                value[i] = new List<string>();
+                for (var j = 0; j < oneLength; ++j)
+                {
+                    reader.ReadValueSafe(out string val);
+                    value[i].Add(val);
+                }
+            }
+        }
+
+        //Serialization write for a List of strings
+        public static void WriteValueSafe(this FastBufferWriter writer, in List<string>[] value)
+        {
+            writer.WriteValueSafe(value.Length);
+            foreach (var item in value)
+            {
+                writer.WriteValueSafe(item.Count);
+                foreach (var subItem in item)
+                {
+                    writer.WriteValueSafe(subItem);
+                }
             }
         }
 

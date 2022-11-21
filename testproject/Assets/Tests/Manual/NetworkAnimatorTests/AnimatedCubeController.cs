@@ -1,3 +1,5 @@
+using System;
+using System.Collections;
 using Unity.Netcode;
 using Unity.Netcode.Components;
 using UnityEngine;
@@ -10,57 +12,207 @@ namespace Tests.Manual.NetworkAnimatorTests
         private Animator m_Animator;
         private bool m_Rotate;
         private NetworkAnimator m_NetworkAnimator;
+        private bool m_IsServerAuthoritative = true;
 
-        private void Awake()
+        private void DetermineNetworkAnimatorComponentType()
         {
-            m_Animator = GetComponent<Animator>();
             m_NetworkAnimator = GetComponent<NetworkAnimator>();
-            m_Rotate = m_Animator.GetBool("Rotate");
+            if (m_NetworkAnimator != null)
+            {
+                m_IsServerAuthoritative = m_NetworkAnimator.GetType() != typeof(OwnerNetworkAnimator);
+            }
+            else
+            {
+                throw new Exception($"{nameof(AnimatedCubeController)} requires that it is paired with either a {nameof(NetworkAnimator)} or {nameof(OwnerNetworkAnimator)}.  Neither of the two components were found!");
+            }
         }
 
         public override void OnNetworkSpawn()
         {
-            if (!IsClient || !IsOwner)
-            {
-                enabled = false;
-            }
+            DetermineNetworkAnimatorComponentType();
+
+            m_Animator = GetComponent<Animator>();
+
+            m_Rotate = m_Animator.GetBool("Rotate");
         }
 
-        private void Update()
+        private bool HasAuthority()
         {
+            if (IsOwnerAuthority() || IsServerAuthority())
             {
-                if (Input.GetKeyDown(KeyCode.C))
-                {
-                    ToggleRotateAnimationServerRpc();
-                }
-                if (Input.GetKeyDown(KeyCode.Space))
-                {
-                    PlayPulseAnimationServerRpc();
-                }
+                return true;
             }
+            return false;
         }
 
-        private void ToggleRotateAnimation()
+        private bool IsServerAuthority()
         {
-            m_Rotate = !m_Rotate;
+            if (IsServer && m_IsServerAuthoritative)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        private bool IsOwnerAuthority()
+        {
+            if (IsOwner && !m_IsServerAuthoritative)
+            {
+                return true;
+            }
+            return false;
+        }
+
+
+        [ServerRpc(RequireOwnership = false)]
+        private void ToggleRotateAnimationServerRpc(bool rotate)
+        {
+            m_Rotate = rotate;
             m_Animator.SetBool("Rotate", m_Rotate);
         }
 
-        private void PlayPulseAnimation()
+        internal void ToggleRotateAnimation()
+        {
+            m_Rotate = !m_Rotate;
+            if (m_IsServerAuthoritative)
+            {
+                if (!IsServer && IsOwner)
+                {
+                    ToggleRotateAnimationServerRpc(m_Rotate);
+                }
+                else if (IsServer && IsOwner)
+                {
+                    m_Animator.SetBool("Rotate", m_Rotate);
+                }
+            }
+            else if (IsOwner)
+            {
+                m_Animator.SetBool("Rotate", m_Rotate);
+            }
+        }
+
+        [ServerRpc(RequireOwnership = false)]
+        private void PlayPulseAnimationServerRpc(bool rotate)
         {
             m_NetworkAnimator.SetTrigger("Pulse");
         }
 
-        [ServerRpc]
-        public void ToggleRotateAnimationServerRpc()
+        internal void PlayPulseAnimation()
         {
-            ToggleRotateAnimation();
+            if (m_IsServerAuthoritative)
+            {
+                if (!IsServer && IsOwner)
+                {
+                    m_NetworkAnimator.SetTrigger("Pulse");
+                }
+                else if (IsServer && IsOwner)
+                {
+                    m_NetworkAnimator.SetTrigger("Pulse");
+                }
+            }
+            else if (IsOwner)
+            {
+                m_NetworkAnimator.SetTrigger("Pulse");
+            }
         }
 
-        [ServerRpc]
-        public void PlayPulseAnimationServerRpc()
+        private Coroutine m_TestAnimatorRoutine;
+
+        internal void TestAnimator(bool useNetworkAnimator = true)
         {
-            PlayPulseAnimation();
+            if (IsServer)
+            {
+                if (m_TestAnimatorRoutine == null)
+                {
+                    m_TestAnimatorRoutine = StartCoroutine(TestAnimatorRoutine());
+                }
+            }
+        }
+
+        private IEnumerator TestAnimatorRoutine()
+        {
+            var waitForSeconds = new WaitForSeconds(0.016f);
+            var counter = 1.0f;
+            Debug.Log("Linearly increase test:");
+            while (counter < 100)
+            {
+                m_Animator.SetFloat("TestFloat", counter);
+                m_Animator.SetInteger("TestInt", (int)counter);
+                counter++;
+                yield return waitForSeconds;
+            }
+            Debug.Log("Random value assignment test:");
+            counter = 0.0f;
+            while (counter < 100)
+            {
+                m_Animator.SetFloat("TestFloat", UnityEngine.Random.Range(0.0f, 100.0f));
+                m_Animator.SetInteger("TestInt", UnityEngine.Random.Range(0, 100));
+                counter++;
+                yield return waitForSeconds;
+            }
+            StopCoroutine(m_TestAnimatorRoutine);
+            m_TestAnimatorRoutine = null;
+        }
+
+        private int m_TestIntValue;
+        private float m_TestFloatValue;
+
+        private void DisplayTestIntValueIfChanged()
+        {
+            var testIntValue = m_Animator.GetInteger("TestInt");
+            if (m_TestIntValue != testIntValue)
+            {
+                m_TestIntValue = testIntValue;
+                Debug.Log($"[{name}]TestInt value changed to = {m_TestIntValue}");
+            }
+            var testFloatValue = m_Animator.GetInteger("TestFloat");
+            if (m_TestFloatValue != testFloatValue)
+            {
+                m_TestFloatValue = testFloatValue;
+                Debug.Log($"[{name}]TestFloat value changed to = {m_TestIntValue}");
+            }
+        }
+
+        private void LateUpdate()
+        {
+
+            if (!IsSpawned || !IsOwner)
+            {
+                if (!IsOwner && IsSpawned)
+                {
+                    DisplayTestIntValueIfChanged();
+                    return;
+                }
+
+                return;
+            }
+
+            DisplayTestIntValueIfChanged();
+
+            // Rotates the cube
+            if (Input.GetKeyDown(KeyCode.C))
+            {
+                ToggleRotateAnimation();
+            }
+
+            // Pulse animation (scale down and up slowly)
+            if (Input.GetKeyDown(KeyCode.Space))
+            {
+                PlayPulseAnimation();
+            }
+
+            // Test changing Animator parameters over time
+            if (Input.GetKeyDown(KeyCode.T))
+            {
+                TestAnimator();
+            }
+
+            if (Input.GetKeyDown(KeyCode.R))
+            {
+                Debug.Log($"[{name}] TestInt value = {m_TestIntValue}");
+                Debug.Log($"[{name}] TestInt value = {m_TestIntValue}");
+            }
         }
     }
 }
+

@@ -16,7 +16,7 @@ namespace Unity.Netcode.TestHelpers.Runtime
     public static class NetcodeIntegrationTestHelpers
     {
         public const int DefaultMinFrames = 1;
-        public const float DefaultTimeout = 1f;
+        public const float DefaultTimeout = 4f;
         private static List<NetworkManager> s_NetworkManagerInstances = new List<NetworkManager>();
         private static Dictionary<NetworkManager, MultiInstanceHooks> s_Hooks = new Dictionary<NetworkManager, MultiInstanceHooks>();
         private static bool s_IsStarted;
@@ -30,10 +30,16 @@ namespace Unity.Netcode.TestHelpers.Runtime
             public MessageHandleCheck Check;
             public bool Result;
         }
+        internal class MessageReceiveCheckWithResult
+        {
+            public Type CheckType;
+            public bool Result;
+        }
 
         private class MultiInstanceHooks : INetworkHooks
         {
             public Dictionary<Type, List<MessageHandleCheckWithResult>> HandleChecks = new Dictionary<Type, List<MessageHandleCheckWithResult>>();
+            public List<MessageReceiveCheckWithResult> ReceiveChecks = new List<MessageReceiveCheckWithResult>();
 
             public static bool CheckForMessageOfType<T>(object receivedMessage) where T : INetworkMessage
             {
@@ -50,6 +56,15 @@ namespace Unity.Netcode.TestHelpers.Runtime
 
             public void OnBeforeReceiveMessage(ulong senderId, Type messageType, int messageSizeBytes)
             {
+                foreach (var check in ReceiveChecks)
+                {
+                    if (check.CheckType == messageType)
+                    {
+                        check.Result = true;
+                        ReceiveChecks.Remove(check);
+                        break;
+                    }
+                }
             }
 
             public void OnAfterReceiveMessage(ulong senderId, Type messageType, int messageSizeBytes)
@@ -77,7 +92,7 @@ namespace Unity.Netcode.TestHelpers.Runtime
                 return true;
             }
 
-            public bool OnVerifyCanReceive(ulong senderId, Type messageType)
+            public bool OnVerifyCanReceive(ulong senderId, Type messageType, FastBufferReader messageContent, ref NetworkContext context)
             {
                 return true;
             }
@@ -103,31 +118,23 @@ namespace Unity.Netcode.TestHelpers.Runtime
             }
         }
 
-        private const string k_FirstPartOfTestRunnerSceneName = "InitTestScene";
+        internal const string FirstPartOfTestRunnerSceneName = "InitTestScene";
 
         public static List<NetworkManager> NetworkManagerInstances => s_NetworkManagerInstances;
 
-        public enum InstanceTransport
-        {
-            SIP,
-            UTP
-        }
-
-        internal static IntegrationTestSceneHandler ClientSceneHandler = null;
+        internal static List<IntegrationTestSceneHandler> ClientSceneHandlers = new List<IntegrationTestSceneHandler>();
 
         /// <summary>
         /// Registers the IntegrationTestSceneHandler for integration tests.
         /// The default client behavior is to not load scenes on the client side.
         /// </summary>
-        private static void RegisterSceneManagerHandler(NetworkManager networkManager)
+        internal static void RegisterSceneManagerHandler(NetworkManager networkManager, bool allowServer = false)
         {
-            if (!networkManager.IsServer)
+            if (!networkManager.IsServer || networkManager.IsServer && allowServer)
             {
-                if (ClientSceneHandler == null)
-                {
-                    ClientSceneHandler = new IntegrationTestSceneHandler();
-                }
-                networkManager.SceneManager.SceneManagerHandler = ClientSceneHandler;
+                var handler = new IntegrationTestSceneHandler(networkManager);
+                ClientSceneHandlers.Add(handler);
+                networkManager.SceneManager.SceneManagerHandler = handler;
             }
         }
 
@@ -139,11 +146,11 @@ namespace Unity.Netcode.TestHelpers.Runtime
         /// </summary>
         public static void CleanUpHandlers()
         {
-            if (ClientSceneHandler != null)
+            foreach (var handler in ClientSceneHandlers)
             {
-                ClientSceneHandler.Dispose();
-                ClientSceneHandler = null;
+                handler.Dispose();
             }
+            ClientSceneHandlers.Clear();
         }
 
         /// <summary>
@@ -162,20 +169,36 @@ namespace Unity.Netcode.TestHelpers.Runtime
             }
         }
 
-        /// <summary>
-        /// Create the correct NetworkTransport, attach it to the game object and return it.
-        /// Default value is SIPTransport.
-        /// </summary>
-        internal static NetworkTransport CreateInstanceTransport(InstanceTransport instanceTransport, GameObject go)
+        private static void AddUnityTransport(NetworkManager networkManager)
         {
-            switch (instanceTransport)
+            // Create transport
+            var unityTransport = networkManager.gameObject.AddComponent<UnityTransport>();
+            // We need to increase this buffer size for tests that spawn a bunch of things
+            unityTransport.MaxPayloadSize = 256000;
+            unityTransport.MaxSendQueueSize = 1024 * 1024;
+
+            // Allow 4 connection attempts that each will time out after 500ms
+            unityTransport.MaxConnectAttempts = 4;
+            unityTransport.ConnectTimeoutMS = 500;
+
+            // Set the NetworkConfig
+            networkManager.NetworkConfig = new NetworkConfig()
             {
-                case InstanceTransport.SIP:
-                    return go.AddComponent<SIPTransport>();
-                default:
-                case InstanceTransport.UTP:
-                    return go.AddComponent<UnityTransport>();
-            }
+                // Set transport
+                NetworkTransport = unityTransport
+            };
+        }
+
+        public static NetworkManager CreateServer()
+        {
+            // Create gameObject
+            var go = new GameObject("NetworkManager - Server");
+
+            // Create networkManager component
+            var server = go.AddComponent<NetworkManager>();
+            NetworkManagerInstances.Insert(0, server);
+            AddUnityTransport(server);
+            return server;
         }
 
         /// <summary>
@@ -185,24 +208,22 @@ namespace Unity.Netcode.TestHelpers.Runtime
         /// <param name="server">The server NetworkManager</param>
         /// <param name="clients">The clients NetworkManagers</param>
         /// <param name="targetFrameRate">The targetFrameRate of the Unity engine to use while the multi instance helper is running. Will be reset on shutdown.</param>
-        public static bool Create(int clientCount, out NetworkManager server, out NetworkManager[] clients, int targetFrameRate = 60, InstanceTransport instanceTransport = InstanceTransport.SIP)
+        /// <param name="serverFirst">This determines if the server or clients will be instantiated first (defaults to server first)</param>
+        public static bool Create(int clientCount, out NetworkManager server, out NetworkManager[] clients, int targetFrameRate = 60, bool serverFirst = true)
         {
             s_NetworkManagerInstances = new List<NetworkManager>();
-            CreateNewClients(clientCount, out clients, instanceTransport);
-
-            // Create gameObject
-            var go = new GameObject("NetworkManager - Server");
-
-            // Create networkManager component
-            server = go.AddComponent<NetworkManager>();
-            NetworkManagerInstances.Insert(0, server);
-
-            // Set the NetworkConfig
-            server.NetworkConfig = new NetworkConfig()
+            server = null;
+            if (serverFirst)
             {
-                // Set transport
-                NetworkTransport = CreateInstanceTransport(instanceTransport, go)
-            };
+                server = CreateServer();
+            }
+
+            CreateNewClients(clientCount, out clients);
+
+            if (!serverFirst)
+            {
+                server = CreateServer();
+            }
 
             s_OriginalTargetFrameRate = Application.targetFrameRate;
             Application.targetFrameRate = targetFrameRate;
@@ -210,28 +231,29 @@ namespace Unity.Netcode.TestHelpers.Runtime
             return true;
         }
 
+        internal static NetworkManager CreateNewClient(int identifier)
+        {
+            // Create gameObject
+            var go = new GameObject("NetworkManager - Client - " + identifier);
+            // Create networkManager component
+            var networkManager = go.AddComponent<NetworkManager>();
+            AddUnityTransport(networkManager);
+            return networkManager;
+        }
+
+
         /// <summary>
         /// Used to add a client to the already existing list of clients
         /// </summary>
         /// <param name="clientCount">The amount of clients</param>
         /// <param name="clients"></param>
-        public static bool CreateNewClients(int clientCount, out NetworkManager[] clients, InstanceTransport instanceTransport = InstanceTransport.SIP)
+        public static bool CreateNewClients(int clientCount, out NetworkManager[] clients)
         {
             clients = new NetworkManager[clientCount];
-            var activeSceneName = SceneManager.GetActiveScene().name;
             for (int i = 0; i < clientCount; i++)
             {
-                // Create gameObject
-                var go = new GameObject("NetworkManager - Client - " + i);
                 // Create networkManager component
-                clients[i] = go.AddComponent<NetworkManager>();
-
-                // Set the NetworkConfig
-                clients[i].NetworkConfig = new NetworkConfig()
-                {
-                    // Set transport
-                    NetworkTransport = CreateInstanceTransport(instanceTransport, go)
-                };
+                clients[i] = CreateNewClient(i);
             }
 
             NetworkManagerInstances.AddRange(clients);
@@ -242,12 +264,32 @@ namespace Unity.Netcode.TestHelpers.Runtime
         /// Stops one single client and makes sure to cleanup any static variables in this helper
         /// </summary>
         /// <param name="clientToStop"></param>
-        public static void StopOneClient(NetworkManager clientToStop)
+        public static void StopOneClient(NetworkManager clientToStop, bool destroy = true)
         {
             clientToStop.Shutdown();
             s_Hooks.Remove(clientToStop);
-            Object.Destroy(clientToStop.gameObject);
-            NetworkManagerInstances.Remove(clientToStop);
+            if (destroy)
+            {
+                Object.Destroy(clientToStop.gameObject);
+                NetworkManagerInstances.Remove(clientToStop);
+            }
+        }
+
+        /// <summary>
+        /// Starts one single client and makes sure to register the required hooks and handlers
+        /// </summary>
+        /// <param name="clientToStart"></param>
+        public static void StartOneClient(NetworkManager clientToStart)
+        {
+            clientToStart.StartClient();
+            s_Hooks[clientToStart] = new MultiInstanceHooks();
+            clientToStart.MessagingSystem.Hook(s_Hooks[clientToStart]);
+            if (!NetworkManagerInstances.Contains(clientToStart))
+            {
+                NetworkManagerInstances.Add(clientToStart);
+            }
+            // if set, then invoke this for the client
+            RegisterHandlers(clientToStart);
         }
 
         /// <summary>
@@ -273,7 +315,10 @@ namespace Unity.Netcode.TestHelpers.Runtime
             // Destroy the network manager instances
             foreach (var networkManager in NetworkManagerInstances)
             {
-                Object.DestroyImmediate(networkManager.gameObject);
+                if (networkManager.gameObject != null)
+                {
+                    Object.Destroy(networkManager.gameObject);
+                }
             }
 
             NetworkManagerInstances.Clear();
@@ -290,7 +335,7 @@ namespace Unity.Netcode.TestHelpers.Runtime
         private static bool VerifySceneIsValidForClientsToLoad(int sceneIndex, string sceneName, LoadSceneMode loadSceneMode)
         {
             // exclude test runner scene
-            if (sceneName.StartsWith(k_FirstPartOfTestRunnerSceneName))
+            if (sceneName.StartsWith(FirstPartOfTestRunnerSceneName))
             {
                 return false;
             }
@@ -317,7 +362,7 @@ namespace Unity.Netcode.TestHelpers.Runtime
             // warning about using the currently active scene
             var scene = SceneManager.GetActiveScene();
             // As long as this is a test runner scene (or most likely a test runner scene)
-            if (scene.name.StartsWith(k_FirstPartOfTestRunnerSceneName))
+            if (scene.name.StartsWith(FirstPartOfTestRunnerSceneName))
             {
                 // Register the test runner scene just so we avoid another warning about not being able to find the
                 // scene to synchronize NetworkObjects.  Next, add the currently active test runner scene to the scenes
@@ -433,8 +478,11 @@ namespace Unity.Netcode.TestHelpers.Runtime
             // this feature only works with NetcodeIntegrationTest derived classes
             if (IsNetcodeIntegrationTestRunning)
             {
-                // Add the object identifier component
-                networkObject.gameObject.AddComponent<ObjectNameIdentifier>();
+                if (networkObject.GetComponent<ObjectNameIdentifier>() == null && networkObject.GetComponentInChildren<ObjectNameIdentifier>() == null)
+                {
+                    // Add the object identifier component
+                    networkObject.gameObject.AddComponent<ObjectNameIdentifier>();
+                }
             }
         }
 
@@ -697,7 +745,35 @@ namespace Unity.Netcode.TestHelpers.Runtime
         /// </summary>
         /// <param name="result">The result. If null, it will fail if the predicate is not met</param>
         /// <param name="timeout">The max time in seconds to wait for</param>
-        internal static IEnumerator WaitForMessageOfType<T>(NetworkManager toBeReceivedBy, ResultWrapper<bool> result = null, float timeout = 0.5f) where T : INetworkMessage
+        internal static IEnumerator WaitForMessageOfTypeReceived<T>(NetworkManager toBeReceivedBy, ResultWrapper<bool> result = null, float timeout = DefaultTimeout) where T : INetworkMessage
+        {
+            var hooks = s_Hooks[toBeReceivedBy];
+            var check = new MessageReceiveCheckWithResult { CheckType = typeof(T) };
+            hooks.ReceiveChecks.Add(check);
+            if (result == null)
+            {
+                result = new ResultWrapper<bool>();
+            }
+
+            var startTime = Time.realtimeSinceStartup;
+
+            while (!check.Result && Time.realtimeSinceStartup - startTime < timeout)
+            {
+                yield return null;
+            }
+
+            var res = check.Result;
+            result.Result = res;
+
+            Assert.True(result.Result, $"Expected message {typeof(T).Name} was not received within {timeout}s.");
+        }
+
+        /// <summary>
+        /// Waits for a message of the given type to be received
+        /// </summary>
+        /// <param name="result">The result. If null, it will fail if the predicate is not met</param>
+        /// <param name="timeout">The max time in seconds to wait for</param>
+        internal static IEnumerator WaitForMessageOfTypeHandled<T>(NetworkManager toBeReceivedBy, ResultWrapper<bool> result = null, float timeout = DefaultTimeout) where T : INetworkMessage
         {
             var hooks = s_Hooks[toBeReceivedBy];
             if (!hooks.HandleChecks.ContainsKey(typeof(T)))
@@ -712,7 +788,7 @@ namespace Unity.Netcode.TestHelpers.Runtime
             }
             yield return ExecuteWaitForHook(check, result, timeout);
 
-            Assert.True(result.Result, $"Expected message {typeof(T).Name} was not received within {timeout}s.");
+            Assert.True(result.Result, $"Expected message {typeof(T).Name} was not handled within {timeout}s.");
         }
 
         /// <summary>
@@ -721,7 +797,7 @@ namespace Unity.Netcode.TestHelpers.Runtime
         /// <param name="requirement">Called for each received message to check if it's the right one</param>
         /// <param name="result">The result. If null, it will fail if the predicate is not met</param>
         /// <param name="timeout">The max time in seconds to wait for</param>
-        internal static IEnumerator WaitForMessageMeetingRequirement<T>(NetworkManager toBeReceivedBy, MessageHandleCheck requirement, ResultWrapper<bool> result = null, float timeout = DefaultTimeout)
+        internal static IEnumerator WaitForMessageMeetingRequirementHandled<T>(NetworkManager toBeReceivedBy, MessageHandleCheck requirement, ResultWrapper<bool> result = null, float timeout = DefaultTimeout)
         {
             var hooks = s_Hooks[toBeReceivedBy];
             if (!hooks.HandleChecks.ContainsKey(typeof(T)))
@@ -736,7 +812,7 @@ namespace Unity.Netcode.TestHelpers.Runtime
             }
             yield return ExecuteWaitForHook(check, result, timeout);
 
-            Assert.True(result.Result, $"Expected message meeting user requirements was not received within {timeout}s.");
+            Assert.True(result.Result, $"Expected message meeting user requirements was not handled within {timeout}s.");
         }
 
         private static IEnumerator ExecuteWaitForHook(MessageHandleCheckWithResult check, ResultWrapper<bool> result, float timeout)

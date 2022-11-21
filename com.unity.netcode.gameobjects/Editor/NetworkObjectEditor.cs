@@ -4,6 +4,9 @@ using UnityEditor;
 
 namespace Unity.Netcode.Editor
 {
+    /// <summary>
+    /// The <see cref="CustomEditor"/> for <see cref="NetworkObject"/>
+    /// </summary>
     [CustomEditor(typeof(NetworkObject), true)]
     [CanEditMultipleObjects]
     public class NetworkObjectEditor : UnityEditor.Editor
@@ -11,6 +14,8 @@ namespace Unity.Netcode.Editor
         private bool m_Initialized;
         private NetworkObject m_NetworkObject;
         private bool m_ShowObservers;
+
+        private static readonly string[] k_HiddenFields = { "m_Script" };
 
         private void Initialize()
         {
@@ -23,6 +28,7 @@ namespace Unity.Netcode.Editor
             m_NetworkObject = (NetworkObject)target;
         }
 
+        /// <inheritdoc/>
         public override void OnInspectorGUI()
         {
             Initialize();
@@ -91,7 +97,11 @@ namespace Unity.Netcode.Editor
             }
             else
             {
-                base.OnInspectorGUI();
+                EditorGUI.BeginChangeCheck();
+                serializedObject.UpdateIfRequiredOrScript();
+                DrawPropertiesExcluding(serializedObject, k_HiddenFields);
+                serializedObject.ApplyModifiedProperties();
+                EditorGUI.EndChangeCheck();
 
                 var guiEnabled = GUI.enabled;
                 GUI.enabled = false;

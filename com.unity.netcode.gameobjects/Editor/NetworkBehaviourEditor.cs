@@ -5,9 +5,13 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using UnityEditor;
+using Unity.Netcode.Editor.Configuration;
 
 namespace Unity.Netcode.Editor
 {
+    /// <summary>
+    /// The <see cref="CustomEditor"/> for <see cref="NetworkBehaviour"/>
+    /// </summary>
     [CustomEditor(typeof(NetworkBehaviour), true)]
     [CanEditMultipleObjects]
     public class NetworkBehaviourEditor : UnityEditor.Editor
@@ -35,8 +39,8 @@ namespace Unity.Netcode.Editor
                 var ft = fields[i].FieldType;
                 if (ft.IsGenericType && ft.GetGenericTypeDefinition() == typeof(NetworkVariable<>) && !fields[i].IsDefined(typeof(HideInInspector), true))
                 {
-                    m_NetworkVariableNames.Add(fields[i].Name);
-                    m_NetworkVariableFields.Add(fields[i].Name, fields[i]);
+                    m_NetworkVariableNames.Add(ObjectNames.NicifyVariableName(fields[i].Name));
+                    m_NetworkVariableFields.Add(ObjectNames.NicifyVariableName(fields[i].Name), fields[i]);
                 }
             }
         }
@@ -153,6 +157,8 @@ namespace Unity.Netcode.Editor
             }
         }
 
+
+        /// <inheritdoc/>
         public override void OnInspectorGUI()
         {
             if (!m_Initialized)
@@ -220,13 +226,21 @@ namespace Unity.Netcode.Editor
         /// </summary>
         private void OnEnable()
         {
+            // This can be null and throw an exception when running test runner in the editor
+            if (target == null)
+            {
+                return;
+            }
             // When we first add a NetworkBehaviour this editor will be enabled
             // so we go ahead and check for an already existing NetworkObject here
             CheckForNetworkObject((target as NetworkBehaviour).gameObject);
         }
 
-        internal const string AutoAddNetworkObjectIfNoneExists = "AutoAdd-NetworkObject-When-None-Exist";
-
+        /// <summary>
+        /// Recursively finds the root parent of a <see cref="Transform"/>
+        /// </summary>
+        /// <param name="transform">The current <see cref="Transform"/> we are inspecting for a parent</param>
+        /// <returns>the root parent for the first <see cref="Transform"/> passed into the method</returns>
         public static Transform GetRootParentTransform(Transform transform)
         {
             if (transform.parent == null || transform.parent == transform)
@@ -241,6 +255,8 @@ namespace Unity.Netcode.Editor
         /// does not already have a NetworkObject component.  If not it will notify
         /// the user that NetworkBehaviours require a NetworkObject.
         /// </summary>
+        /// <param name="gameObject"><see cref="GameObject"/> to start checking for a <see cref="NetworkObject"/></param>
+        /// <param name="networkObjectRemoved">used internally</param>
         public static void CheckForNetworkObject(GameObject gameObject, bool networkObjectRemoved = false)
         {
             // If there are no NetworkBehaviours or no gameObject, then exit early
@@ -251,11 +267,42 @@ namespace Unity.Netcode.Editor
 
             // Now get the root parent transform to the current GameObject (or itself)
             var rootTransform = GetRootParentTransform(gameObject.transform);
+            if (!rootTransform.TryGetComponent<NetworkManager>(out var networkManager))
+            {
+                networkManager = rootTransform.GetComponentInChildren<NetworkManager>();
+            }
+
+            // If there is a NetworkManager, then notify the user that a NetworkManager cannot have NetworkBehaviour components
+            if (networkManager != null)
+            {
+                var networkBehaviours = networkManager.gameObject.GetComponents<NetworkBehaviour>();
+                var networkBehavioursChildren = networkManager.gameObject.GetComponentsInChildren<NetworkBehaviour>();
+                if (networkBehaviours.Length > 0 || networkBehavioursChildren.Length > 0)
+                {
+                    if (EditorUtility.DisplayDialog("NetworkBehaviour or NetworkManager Cannot Be Added", $"{nameof(NetworkManager)}s cannot have {nameof(NetworkBehaviour)} components added to the root parent or any of its children." +
+                        $" Would you like to remove the NetworkManager or NetworkBehaviour?", "NetworkManager", "NetworkBehaviour"))
+                    {
+                        DestroyImmediate(networkManager);
+                    }
+                    else
+                    {
+                        foreach (var networkBehaviour in networkBehaviours)
+                        {
+                            DestroyImmediate(networkBehaviour);
+                        }
+
+                        foreach (var networkBehaviour in networkBehaviours)
+                        {
+                            DestroyImmediate(networkBehaviour);
+                        }
+                    }
+                    return;
+                }
+            }
 
             // Otherwise, check to see if there is any NetworkObject from the root GameObject down to all children.
             // If not, notify the user that NetworkBehaviours require that the relative GameObject has a NetworkObject component.
-            var networkObject = rootTransform.GetComponent<NetworkObject>();
-            if (networkObject == null)
+            if (!rootTransform.TryGetComponent<NetworkObject>(out var networkObject))
             {
                 networkObject = rootTransform.GetComponentInChildren<NetworkObject>();
 
@@ -265,7 +312,7 @@ namespace Unity.Netcode.Editor
                     // and the user has already turned "Auto-Add NetworkObject" on when first notified about the requirement
                     // then just send a reminder to the user why the NetworkObject they just deleted seemingly "re-appeared"
                     // again.
-                    if (networkObjectRemoved && EditorPrefs.HasKey(AutoAddNetworkObjectIfNoneExists) && EditorPrefs.GetBool(AutoAddNetworkObjectIfNoneExists))
+                    if (networkObjectRemoved && NetcodeForGameObjectsSettings.GetAutoAddNetworkObjectSetting())
                     {
                         Debug.LogWarning($"{gameObject.name} still has {nameof(NetworkBehaviour)}s and Auto-Add NetworkObjects is enabled. A NetworkObject is being added back to {gameObject.name}.");
                         Debug.Log($"To reset Auto-Add NetworkObjects: Select the Netcode->General->Reset Auto-Add NetworkObject menu item.");
@@ -274,7 +321,7 @@ namespace Unity.Netcode.Editor
                     // Notify and provide the option to add it one time, always add a NetworkObject, or do nothing and let the user manually add it
                     if (EditorUtility.DisplayDialog($"{nameof(NetworkBehaviour)}s require a {nameof(NetworkObject)}",
                     $"{gameObject.name} does not have a {nameof(NetworkObject)} component.  Would you like to add one now?", "Yes", "No (manually add it)",
-                    DialogOptOutDecisionType.ForThisMachine, AutoAddNetworkObjectIfNoneExists))
+                    DialogOptOutDecisionType.ForThisMachine, NetcodeForGameObjectsSettings.AutoAddNetworkObjectIfNoneExists))
                     {
                         gameObject.AddComponent<NetworkObject>();
                         var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
@@ -282,21 +329,6 @@ namespace Unity.Netcode.Editor
                         UnityEditor.SceneManagement.EditorSceneManager.SaveScene(activeScene);
                     }
                 }
-            }
-        }
-
-        /// <summary>
-        /// This allows users to reset the Auto-Add NetworkObject preference
-        /// so the next time they add a NetworkBehaviour to a GameObject without
-        /// a NetworkObject it will display the dialog box again and not
-        /// automatically add a NetworkObject.
-        /// </summary>
-        [MenuItem("Netcode/General/Reset Auto-Add NetworkObject", false, 1)]
-        private static void ResetMultiplayerToolsTipStatus()
-        {
-            if (EditorPrefs.HasKey(AutoAddNetworkObjectIfNoneExists))
-            {
-                EditorPrefs.SetBool(AutoAddNetworkObjectIfNoneExists, false);
             }
         }
     }

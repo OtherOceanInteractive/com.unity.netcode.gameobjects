@@ -20,7 +20,7 @@ namespace Unity.Netcode
     /// <summary>
     /// The main component of the library
     /// </summary>
-    [AddComponentMenu("Netcode/" + nameof(NetworkManager), -100)]
+    [AddComponentMenu("Netcode/Network Manager", -100)]
     public class NetworkManager : MonoBehaviour, INetworkUpdateSystem
     {
 #pragma warning disable IDE1006 // disable naming rule violation check
@@ -51,15 +51,25 @@ namespace Unity.Netcode
 
         internal static string PrefabDebugHelper(NetworkPrefab networkPrefab)
         {
-            return $"{nameof(NetworkPrefab)} \"{networkPrefab.Prefab.gameObject.name}\"";
+            return $"{nameof(NetworkPrefab)} \"{networkPrefab.Prefab.name}\"";
         }
 
-        internal NetworkBehaviourUpdater BehaviourUpdater { get; private set; }
+        internal NetworkBehaviourUpdater BehaviourUpdater { get; set; }
+
+        internal void MarkNetworkObjectDirty(NetworkObject networkObject)
+        {
+            BehaviourUpdater.AddForUpdate(networkObject);
+        }
 
         internal MessagingSystem MessagingSystem { get; private set; }
 
         private NetworkPrefabHandler m_PrefabHandler;
 
+        internal Dictionary<ulong, ConnectionApprovalResponse> ClientsToApprove = new Dictionary<ulong, ConnectionApprovalResponse>();
+
+        /// <summary>
+        /// The <see cref="NetworkPrefabHandler"/> instance created after starting the <see cref="NetworkManager"/>
+        /// </summary>
         public NetworkPrefabHandler PrefabHandler
         {
             get
@@ -75,6 +85,12 @@ namespace Unity.Netcode
 
         private bool m_ShuttingDown;
         private bool m_StopProcessingMessages;
+
+        /// <summary>
+        /// When disconnected from the server, the server may send a reason. If a reason was sent, this property will
+        /// tell client code what the reason was. It should be queried after the OnClientDisconnectCallback is called
+        /// </summary>
+        public string DisconnectReason { get; internal set; }
 
         private class NetworkManagerHooks : INetworkHooks
         {
@@ -122,7 +138,7 @@ namespace Unity.Netcode
                 return !m_NetworkManager.m_StopProcessingMessages;
             }
 
-            public bool OnVerifyCanReceive(ulong senderId, Type messageType)
+            public bool OnVerifyCanReceive(ulong senderId, Type messageType, FastBufferReader messageContent, ref NetworkContext context)
             {
                 if (m_NetworkManager.PendingClients.TryGetValue(senderId, out PendingClient client) &&
                     (client.ConnectionState == PendingClient.State.PendingApproval || (client.ConnectionState == PendingClient.State.PendingConnection && messageType != typeof(ConnectionRequestMessage))))
@@ -177,8 +193,7 @@ namespace Unity.Netcode
         /// <returns>a <see cref="GameObject"/> that is either the override or if no overrides exist it returns the same as the one passed in as a parameter</returns>
         public GameObject GetNetworkPrefabOverride(GameObject gameObject)
         {
-            var networkObject = gameObject.GetComponent<NetworkObject>();
-            if (networkObject != null)
+            if (gameObject.TryGetComponent<NetworkObject>(out var networkObject))
             {
                 if (NetworkConfig.NetworkPrefabOverrideLinks.ContainsKey(networkObject.GlobalObjectIdHash))
                 {
@@ -195,23 +210,38 @@ namespace Unity.Netcode
             return gameObject;
         }
 
+        /// <summary>
+        /// Accessor for the <see cref="NetworkTimeSystem"/> of the NetworkManager.
+        /// Prefer the use of the LocalTime and ServerTime properties
+        /// </summary>
         public NetworkTimeSystem NetworkTimeSystem { get; private set; }
 
+        /// <summary>
+        /// Accessor for the <see cref="NetworkTickSystem"/> of the NetworkManager.
+        /// </summary>
         public NetworkTickSystem NetworkTickSystem { get; private set; }
 
+        /// <summary>
+        /// The local <see cref="NetworkTime"/>
+        /// </summary>
         public NetworkTime LocalTime => NetworkTickSystem?.LocalTime ?? default;
 
+        /// <summary>
+        /// The <see cref="NetworkTime"/> on the server
+        /// </summary>
         public NetworkTime ServerTime => NetworkTickSystem?.ServerTime ?? default;
 
         /// <summary>
         /// Gets or sets if the application should be set to run in background
         /// </summary>
-        [HideInInspector] public bool RunInBackground = true;
+        [HideInInspector]
+        public bool RunInBackground = true;
 
         /// <summary>
         /// The log level to use
         /// </summary>
-        [HideInInspector] public LogLevel LogLevel = LogLevel.Normal;
+        [HideInInspector]
+        public LogLevel LogLevel = LogLevel.Normal;
 
         /// <summary>
         /// The singleton instance of the NetworkManager
@@ -223,10 +253,21 @@ namespace Unity.Netcode
         /// </summary>
         public NetworkSpawnManager SpawnManager { get; private set; }
 
+        internal IDeferredMessageManager DeferredMessageManager { get; private set; }
+
+        /// <summary>
+        /// Gets the CustomMessagingManager for this NetworkManager
+        /// </summary>
         public CustomMessagingManager CustomMessagingManager { get; private set; }
 
+        /// <summary>
+        /// The <see cref="NetworkSceneManager"/> instance created after starting the <see cref="NetworkManager"/>
+        /// </summary>
         public NetworkSceneManager SceneManager { get; private set; }
 
+        /// <summary>
+        /// The client id used to represent the server
+        /// </summary>
         public const ulong ServerClientId = 0;
 
         /// <summary>
@@ -331,11 +372,25 @@ namespace Unity.Netcode
         public bool IsListening { get; internal set; }
 
         /// <summary>
-        /// Gets if we are connected as a client
+        /// When true, the client is connected, approved, and synchronized with
+        /// the server.
         /// </summary>
         public bool IsConnectedClient { get; internal set; }
 
+        /// <summary>
+        /// Is true when the client has been approved.
+        /// </summary>
+        /// <remarks>
+        /// This only reflects the client's approved status and does not mean the client
+        /// has finished the connection and synchronization process. The server-host will
+        /// always be approved upon being starting the <see cref="NetworkManager"/>
+        /// <see cref="IsConnectedClient"/>
+        /// </remarks>
+        public bool IsApproved { get; internal set; }
 
+        /// <summary>
+        /// Can be used to determine if the <see cref="NetworkManager"/> is currently shutting itself down
+        /// </summary>
         public bool ShutdownInProgress { get { return m_ShuttingDown; } }
 
         /// <summary>
@@ -356,26 +411,93 @@ namespace Unity.Netcode
         public event Action OnServerStarted = null;
 
         /// <summary>
-        /// Delegate type called when connection has been approved. This only has to be set on the server.
+        /// The callback to invoke if the <see cref="NetworkTransport"/> fails.
         /// </summary>
-        /// <param name="createPlayerObject">If true, a player object will be created. Otherwise the client will have no object.</param>
-        /// <param name="playerPrefabHash">The prefabHash to use for the client. If createPlayerObject is false, this is ignored. If playerPrefabHash is null, the default player prefab is used.</param>
-        /// <param name="approved">Whether or not the client was approved</param>
-        /// <param name="position">The position to spawn the client at. If null, the prefab position is used.</param>
-        /// <param name="rotation">The rotation to spawn the client with. If null, the prefab position is used.</param>
-        public delegate void ConnectionApprovedDelegate(bool createPlayerObject, uint? playerPrefabHash, bool approved, Vector3? position, Quaternion? rotation);
+        /// <remarks>
+        /// A failure of the transport is always followed by the <see cref="NetworkManager"/> shutting down. Recovering
+        /// from a transport failure would normally entail reconfiguring the transport (e.g. re-authenticating, or
+        /// recreating a new service allocation depending on the transport) and restarting the client/server/host.
+        /// </remarks>
+        public event Action OnTransportFailure = null;
 
         /// <summary>
-        /// The callback to invoke during connection approval
+        /// Connection Approval Response
         /// </summary>
-        public event Action<byte[], ulong, ConnectionApprovedDelegate> ConnectionApprovalCallback = null;
+        public class ConnectionApprovalResponse
+        {
+            /// <summary>
+            /// Whether or not the client was approved
+            /// </summary>
+            public bool Approved;
+            /// <summary>
+            /// If true, a player object will be created. Otherwise the client will have no object.
+            /// </summary>
+            public bool CreatePlayerObject;
+            /// <summary>
+            /// The prefabHash to use for the client. If createPlayerObject is false, this is ignored. If playerPrefabHash is null, the default player prefab is used.
+            /// </summary>
+            public uint? PlayerPrefabHash;
+            /// <summary>
+            /// The position to spawn the client at. If null, the prefab position is used.
+            /// </summary>
+            public Vector3? Position;
+            /// <summary>
+            /// The rotation to spawn the client with. If null, the prefab position is used.
+            /// </summary>
+            public Quaternion? Rotation;
+            /// <summary>
+            /// If the Approval decision cannot be made immediately, the client code can set Pending to true, keep a reference to the ConnectionApprovalResponse object and write to it later. Client code must exercise care to setting all the members to the value it wants before marking Pending to false, to indicate completion. If the field is set as Pending = true, we'll monitor the object until it gets set to not pending anymore and use the parameters then.
+            /// </summary>
+            public bool Pending;
 
-        internal void InvokeConnectionApproval(byte[] payload, ulong clientId, ConnectionApprovedDelegate action) => ConnectionApprovalCallback?.Invoke(payload, clientId, action);
+            /// <summary>
+            /// Optional reason. If Approved is false, this reason will be sent to the client so they know why they
+            /// were not approved.
+            /// </summary>
+            public string Reason;
+        }
+
+        /// <summary>
+        /// Connection Approval Request
+        /// </summary>
+        public struct ConnectionApprovalRequest
+        {
+            /// <summary>
+            /// The connection data payload
+            /// </summary>
+            public byte[] Payload;
+            /// <summary>
+            /// The Network Id of the client we are about to handle
+            /// </summary>
+            public ulong ClientNetworkId;
+        }
+
+        /// <summary>
+        /// The callback to invoke during connection approval. Allows client code to decide whether or not to allow incoming client connection
+        /// </summary>
+        public Action<ConnectionApprovalRequest, ConnectionApprovalResponse> ConnectionApprovalCallback
+        {
+            get => m_ConnectionApprovalCallback;
+            set
+            {
+                if (value != null && value.GetInvocationList().Length > 1)
+                {
+                    throw new InvalidOperationException($"Only one {nameof(ConnectionApprovalCallback)} can be registered at a time.");
+                }
+                else
+                {
+                    m_ConnectionApprovalCallback = value;
+                }
+            }
+        }
+
+        private Action<ConnectionApprovalRequest, ConnectionApprovalResponse> m_ConnectionApprovalCallback;
 
         /// <summary>
         /// The current NetworkConfig
         /// </summary>
-        [HideInInspector] public NetworkConfig NetworkConfig;
+        [HideInInspector]
+        public NetworkConfig NetworkConfig;
 
         /// <summary>
         /// The current host name we are connected to, used to validate certificate
@@ -387,7 +509,7 @@ namespace Unity.Netcode
         internal static event Action OnSingletonReady;
 
 #if UNITY_EDITOR
-        private void OnValidate()
+        internal void OnValidate()
         {
             if (NetworkConfig == null)
             {
@@ -420,8 +542,7 @@ namespace Unity.Netcode
                 var networkPrefabGo = networkPrefab?.Prefab;
                 if (networkPrefabGo != null)
                 {
-                    var networkObject = networkPrefabGo.GetComponent<NetworkObject>();
-                    if (networkObject == null)
+                    if (!networkPrefabGo.TryGetComponent<NetworkObject>(out var networkObject))
                     {
                         if (NetworkLog.CurrentLogLevel <= LogLevel.Normal)
                         {
@@ -484,6 +605,292 @@ namespace Unity.Netcode
             }
         }
 #endif
+        /// <summary>
+        /// Adds a new prefab to the network prefab list.
+        /// This can be any GameObject with a NetworkObject component, from any source (addressables, asset
+        /// bundles, Resource.Load, dynamically created, etc)
+        ///
+        /// There are three limitations to this method:
+        /// - If you have NetworkConfig.ForceSamePrefabs enabled, you can only do this before starting
+        /// networking, and the server and all connected clients must all have the same exact set of prefabs
+        /// added via this method before connecting
+        /// - Adding a prefab on the server does not automatically add it on the client - it's up to you
+        /// to make sure the client and server are synchronized via whatever method makes sense for your game
+        /// (RPCs, configs, deterministic loading, etc)
+        /// - If the server sends a Spawn message to a client that has not yet added a prefab for, the spawn message
+        /// and any other relevant messages will be held for a configurable time (default 1 second, configured via
+        /// NetworkConfig.SpawnTimeout) before an error is logged. This is intented to enable the SDK to gracefully
+        /// handle unexpected conditions (slow disks, slow network, etc) that slow down asset loading. This timeout
+        /// should not be relied on and code shouldn't be written around it - your code should be written so that
+        /// the asset is expected to be loaded before it's needed.
+        /// </summary>
+        /// <param name="prefab"></param>
+        /// <exception cref="Exception"></exception>
+        public void AddNetworkPrefab(GameObject prefab)
+        {
+            if (IsListening && NetworkConfig.ForceSamePrefabs)
+            {
+                throw new Exception($"All prefabs must be registered before starting {nameof(NetworkManager)} when {nameof(NetworkConfig.ForceSamePrefabs)} is enabled.");
+            }
+
+            var networkObject = prefab.GetComponent<NetworkObject>();
+            if (!networkObject)
+            {
+                throw new Exception($"All {nameof(NetworkPrefab)}s must contain a {nameof(NetworkObject)} component.");
+            }
+
+            var networkPrefab = new NetworkPrefab { Prefab = prefab };
+            NetworkConfig.NetworkPrefabs.Add(networkPrefab);
+            if (IsListening)
+            {
+                var sourcePrefabGlobalObjectIdHash = (uint)0;
+                var targetPrefabGlobalObjectIdHash = (uint)0;
+                if (!ShouldAddPrefab(networkPrefab, out sourcePrefabGlobalObjectIdHash, out targetPrefabGlobalObjectIdHash))
+                {
+                    NetworkConfig.NetworkPrefabs.Remove(networkPrefab);
+                    return;
+                }
+
+                if (!AddPrefabRegistration(networkPrefab, sourcePrefabGlobalObjectIdHash, targetPrefabGlobalObjectIdHash))
+                {
+                    NetworkConfig.NetworkPrefabs.Remove(networkPrefab);
+                    return;
+                }
+                DeferredMessageManager.ProcessTriggers(IDeferredMessageManager.TriggerType.OnAddPrefab, networkObject.GlobalObjectIdHash);
+            }
+        }
+
+        /// <summary>
+        /// Remove a prefab from the prefab list.
+        /// As with AddNetworkPrefab, this is specific to the client it's called on -
+        /// calling it on the server does not automatically remove anything on any of the
+        /// client processes.
+        ///
+        /// Like AddNetworkPrefab, when NetworkConfig.ForceSamePrefabs is enabled,
+        /// this cannot be called after connecting.
+        /// </summary>
+        /// <param name="prefab"></param>
+        public void RemoveNetworkPrefab(GameObject prefab)
+        {
+            if (IsListening && NetworkConfig.ForceSamePrefabs)
+            {
+                throw new Exception($"Prefabs cannot be removed after starting {nameof(NetworkManager)} when {nameof(NetworkConfig.ForceSamePrefabs)} is enabled.");
+            }
+
+            var globalObjectIdHash = prefab.GetComponent<NetworkObject>().GlobalObjectIdHash;
+            for (var i = 0; i < NetworkConfig.NetworkPrefabs.Count; ++i)
+            {
+                if (NetworkConfig.NetworkPrefabs[i].Prefab.GetComponent<NetworkObject>().GlobalObjectIdHash == globalObjectIdHash)
+                {
+                    NetworkConfig.NetworkPrefabs.RemoveAt(i);
+                    break;
+                }
+            }
+            if (PrefabHandler.ContainsHandler(globalObjectIdHash))
+            {
+                PrefabHandler.RemoveHandler(globalObjectIdHash);
+            }
+            if (NetworkConfig.NetworkPrefabOverrideLinks.TryGetValue(globalObjectIdHash, out var targetPrefab))
+            {
+                NetworkConfig.NetworkPrefabOverrideLinks.Remove(globalObjectIdHash);
+                var targetHash = targetPrefab.Prefab.GetComponent<NetworkObject>().GlobalObjectIdHash;
+                if (NetworkConfig.OverrideToNetworkPrefab.ContainsKey(targetHash))
+                {
+                    NetworkConfig.OverrideToNetworkPrefab.Remove(targetHash);
+                }
+            }
+        }
+
+        private bool ShouldAddPrefab(NetworkPrefab networkPrefab, out uint sourcePrefabGlobalObjectIdHash, out uint targetPrefabGlobalObjectIdHash, int index = -1)
+        {
+            sourcePrefabGlobalObjectIdHash = 0;
+            targetPrefabGlobalObjectIdHash = 0;
+            var networkObject = (NetworkObject)null;
+            if (networkPrefab == null || (networkPrefab.Prefab == null && networkPrefab.Override == NetworkPrefabOverride.None))
+            {
+                if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
+                {
+                    NetworkLog.LogWarning(
+                        $"{nameof(NetworkPrefab)} cannot be null ({nameof(NetworkPrefab)} at index: {index})");
+                }
+                return false;
+            }
+            else if (networkPrefab.Override == NetworkPrefabOverride.None)
+            {
+                if (!networkPrefab.Prefab.TryGetComponent(out networkObject))
+                {
+                    if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
+                    {
+                        NetworkLog.LogWarning($"{PrefabDebugHelper(networkPrefab)} is missing " +
+                                              $"a {nameof(NetworkObject)} component (entry will be ignored).");
+                    }
+                    return false;
+                }
+
+                // Otherwise get the GlobalObjectIdHash value
+                sourcePrefabGlobalObjectIdHash = networkObject.GlobalObjectIdHash;
+            }
+            else // Validate Overrides
+            {
+                // Validate source prefab override values first
+                switch (networkPrefab.Override)
+                {
+                    case NetworkPrefabOverride.Hash:
+                        {
+                            if (networkPrefab.SourceHashToOverride == 0)
+                            {
+                                if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
+                                {
+                                    NetworkLog.LogWarning($"{nameof(NetworkPrefab)} {nameof(NetworkPrefab.SourceHashToOverride)} is zero " +
+                                                          "(entry will be ignored).");
+                                }
+                                return false;
+                            }
+                            sourcePrefabGlobalObjectIdHash = networkPrefab.SourceHashToOverride;
+                            break;
+                        }
+                    case NetworkPrefabOverride.Prefab:
+                        {
+                            if (networkPrefab.SourcePrefabToOverride == null)
+                            {
+                                if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
+                                {
+                                    NetworkLog.LogWarning($"{nameof(NetworkPrefab)} {nameof(NetworkPrefab.SourcePrefabToOverride)} is null (entry will be ignored).");
+                                }
+
+                                Debug.LogWarning($"{nameof(NetworkPrefab)} override entry {networkPrefab.SourceHashToOverride} will be removed and ignored.");
+                                return false;
+                            }
+                            else
+                            {
+                                if (!networkPrefab.SourcePrefabToOverride.TryGetComponent(out networkObject))
+                                {
+                                    if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
+                                    {
+                                        NetworkLog.LogWarning($"{nameof(NetworkPrefab)} ({networkPrefab.SourcePrefabToOverride.name}) " +
+                                                              $"is missing a {nameof(NetworkObject)} component (entry will be ignored).");
+                                    }
+
+                                    Debug.LogWarning($"{nameof(NetworkPrefab)} override entry (\"{networkPrefab.SourcePrefabToOverride.name}\") will be removed and ignored.");
+                                    return false;
+                                }
+
+                                sourcePrefabGlobalObjectIdHash = networkObject.GlobalObjectIdHash;
+                            }
+                            break;
+                        }
+                }
+
+                // Validate target prefab override values next
+                if (networkPrefab.OverridingTargetPrefab == null)
+                {
+                    if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
+                    {
+                        NetworkLog.LogWarning($"{nameof(NetworkPrefab)} {nameof(NetworkPrefab.OverridingTargetPrefab)} is null!");
+                    }
+                    switch (networkPrefab.Override)
+                    {
+                        case NetworkPrefabOverride.Hash:
+                            {
+                                Debug.LogWarning($"{nameof(NetworkPrefab)} override entry {networkPrefab.SourceHashToOverride} will be removed and ignored.");
+                                break;
+                            }
+                        case NetworkPrefabOverride.Prefab:
+                            {
+                                Debug.LogWarning($"{nameof(NetworkPrefab)} override entry ({networkPrefab.SourcePrefabToOverride.name}) will be removed and ignored.");
+                                break;
+                            }
+                    }
+                    return false;
+                }
+                else
+                {
+                    targetPrefabGlobalObjectIdHash = networkPrefab.OverridingTargetPrefab.GetComponent<NetworkObject>().GlobalObjectIdHash;
+                }
+            }
+            return true;
+        }
+
+        internal bool AddPrefabRegistration(NetworkPrefab networkPrefab, uint sourcePrefabGlobalObjectIdHash, uint targetPrefabGlobalObjectIdHash)
+        {
+            // Assign the appropriate GlobalObjectIdHash to the appropriate NetworkPrefab
+            if (!NetworkConfig.NetworkPrefabOverrideLinks.ContainsKey(sourcePrefabGlobalObjectIdHash))
+            {
+                if (networkPrefab.Override == NetworkPrefabOverride.None)
+                {
+                    NetworkConfig.NetworkPrefabOverrideLinks.Add(sourcePrefabGlobalObjectIdHash, networkPrefab);
+                }
+                else
+                {
+                    if (!NetworkConfig.OverrideToNetworkPrefab.ContainsKey(targetPrefabGlobalObjectIdHash))
+                    {
+                        switch (networkPrefab.Override)
+                        {
+                            case NetworkPrefabOverride.Prefab:
+                                {
+                                    NetworkConfig.NetworkPrefabOverrideLinks.Add(sourcePrefabGlobalObjectIdHash, networkPrefab);
+                                    NetworkConfig.OverrideToNetworkPrefab.Add(targetPrefabGlobalObjectIdHash, sourcePrefabGlobalObjectIdHash);
+                                }
+                                break;
+                            case NetworkPrefabOverride.Hash:
+                                {
+                                    NetworkConfig.NetworkPrefabOverrideLinks.Add(sourcePrefabGlobalObjectIdHash, networkPrefab);
+                                    NetworkConfig.OverrideToNetworkPrefab.Add(targetPrefabGlobalObjectIdHash, sourcePrefabGlobalObjectIdHash);
+                                }
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        var networkObject = networkPrefab.Prefab.GetComponent<NetworkObject>();
+                        // This can happen if a user tries to make several GlobalObjectIdHash values point to the same target
+                        Debug.LogError($"{nameof(NetworkPrefab)} (\"{networkObject.name}\") has a duplicate {nameof(NetworkObject.GlobalObjectIdHash)} target entry value of: {targetPrefabGlobalObjectIdHash}! Removing entry from list!");
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                var networkObject = networkPrefab.Prefab.GetComponent<NetworkObject>();
+                // This should never happen, but in the case it somehow does log an error and remove the duplicate entry
+                Debug.LogError($"{nameof(NetworkPrefab)} ({networkObject.name}) has a duplicate {nameof(NetworkObject.GlobalObjectIdHash)} source entry value of: {sourcePrefabGlobalObjectIdHash}! Removing entry from list!");
+                return false;
+            }
+            return true;
+        }
+
+        private void InitializePrefabs(int startIdx = 0)
+        {
+            // This is used to remove entries not needed or invalid
+            var removeEmptyPrefabs = new List<int>();
+
+            // Build the NetworkPrefabOverrideLinks dictionary
+            for (int i = startIdx; i < NetworkConfig.NetworkPrefabs.Count; i++)
+            {
+                var sourcePrefabGlobalObjectIdHash = (uint)0;
+                var targetPrefabGlobalObjectIdHash = (uint)0;
+                if (!ShouldAddPrefab(NetworkConfig.NetworkPrefabs[i], out sourcePrefabGlobalObjectIdHash, out targetPrefabGlobalObjectIdHash, i))
+                {
+                    removeEmptyPrefabs.Add(i);
+                    continue;
+                }
+
+                if (!AddPrefabRegistration(NetworkConfig.NetworkPrefabs[i], sourcePrefabGlobalObjectIdHash, targetPrefabGlobalObjectIdHash))
+                {
+                    removeEmptyPrefabs.Add(i);
+                    continue;
+                }
+            }
+
+            // Clear out anything that is invalid or not used (for invalid entries we already logged warnings to the user earlier)
+            // Iterate backwards so indices don't shift as we remove
+            for (int i = removeEmptyPrefabs.Count - 1; i >= 0; i--)
+            {
+                NetworkConfig.NetworkPrefabs.RemoveAt(removeEmptyPrefabs[i]);
+            }
+
+            removeEmptyPrefabs.Clear();
+        }
 
         private void Initialize(bool server)
         {
@@ -493,6 +900,11 @@ namespace Unity.Netcode
             {
                 return;
             }
+
+            DisconnectReason = string.Empty;
+            IsApproved = false;
+
+            ComponentFactory.SetDefaults();
 
             if (NetworkLog.CurrentLogLevel <= LogLevel.Developer)
             {
@@ -514,15 +926,12 @@ namespace Unity.Netcode
 #endif
             LocalClientId = ulong.MaxValue;
 
-            PendingClients.Clear();
-            m_ConnectedClients.Clear();
-            m_ConnectedClientsList.Clear();
-            m_ConnectedClientIds.Clear();
-            LocalClient = null;
-            NetworkObject.OrphanChildren.Clear();
+            ClearClients();
 
             // Create spawn manager instance
             SpawnManager = new NetworkSpawnManager(this);
+
+            DeferredMessageManager = ComponentFactory.Create<IDeferredMessageManager>(this);
 
             CustomMessagingManager = new CustomMessagingManager(this);
 
@@ -573,177 +982,16 @@ namespace Unity.Netcode
 
             this.RegisterNetworkUpdate(NetworkUpdateStage.PreUpdate);
 
-            // This is used to remove entries not needed or invalid
-            var removeEmptyPrefabs = new List<int>();
-
             // Always clear our prefab override links before building
             NetworkConfig.NetworkPrefabOverrideLinks.Clear();
             NetworkConfig.OverrideToNetworkPrefab.Clear();
 
-            // Build the NetworkPrefabOverrideLinks dictionary
-            for (int i = 0; i < NetworkConfig.NetworkPrefabs.Count; i++)
-            {
-                var sourcePrefabGlobalObjectIdHash = (uint)0;
-                var targetPrefabGlobalObjectIdHash = (uint)0;
-                var networkObject = (NetworkObject)null;
-                if (NetworkConfig.NetworkPrefabs[i] == null || (NetworkConfig.NetworkPrefabs[i].Prefab == null && NetworkConfig.NetworkPrefabs[i].Override == NetworkPrefabOverride.None))
-                {
-                    if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
-                    {
-                        NetworkLog.LogWarning(
-                            $"{nameof(NetworkPrefab)} cannot be null ({nameof(NetworkPrefab)} at index: {i})");
-                    }
-
-                    removeEmptyPrefabs.Add(i);
-                    continue;
-                }
-                else if (NetworkConfig.NetworkPrefabs[i].Override == NetworkPrefabOverride.None)
-                {
-                    var networkPrefab = NetworkConfig.NetworkPrefabs[i];
-                    networkObject = networkPrefab.Prefab.GetComponent<NetworkObject>();
-                    if (networkObject == null)
-                    {
-                        if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
-                        {
-                            NetworkLog.LogWarning($"{PrefabDebugHelper(networkPrefab)} is missing " +
-                                $"a {nameof(NetworkObject)} component (entry will be ignored).");
-                        }
-                        removeEmptyPrefabs.Add(i);
-                        continue;
-                    }
-
-                    // Otherwise get the GlobalObjectIdHash value
-                    sourcePrefabGlobalObjectIdHash = networkObject.GlobalObjectIdHash;
-                }
-                else // Validate Overrides
-                {
-                    // Validate source prefab override values first
-                    switch (NetworkConfig.NetworkPrefabs[i].Override)
-                    {
-                        case NetworkPrefabOverride.Hash:
-                            {
-                                if (NetworkConfig.NetworkPrefabs[i].SourceHashToOverride == 0)
-                                {
-                                    if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
-                                    {
-                                        NetworkLog.LogWarning($"{nameof(NetworkPrefab)} {nameof(NetworkPrefab.SourceHashToOverride)} is zero " +
-                                            "(entry will be ignored).");
-                                    }
-                                    removeEmptyPrefabs.Add(i);
-                                    continue;
-                                }
-                                sourcePrefabGlobalObjectIdHash = NetworkConfig.NetworkPrefabs[i].SourceHashToOverride;
-                                break;
-                            }
-                        case NetworkPrefabOverride.Prefab:
-                            {
-                                if (NetworkConfig.NetworkPrefabs[i].SourcePrefabToOverride == null)
-                                {
-                                    if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
-                                    {
-                                        NetworkLog.LogWarning($"{nameof(NetworkPrefab)} {nameof(NetworkPrefab.SourcePrefabToOverride)} is null (entry will be ignored).");
-                                    }
-                                    Debug.LogWarning($"{nameof(NetworkPrefab)} override entry {NetworkConfig.NetworkPrefabs[i].SourceHashToOverride} will be removed and ignored.");
-                                    removeEmptyPrefabs.Add(i);
-                                    continue;
-                                }
-                                else
-                                {
-                                    networkObject = NetworkConfig.NetworkPrefabs[i].SourcePrefabToOverride.GetComponent<NetworkObject>();
-                                    if (networkObject == null)
-                                    {
-                                        if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
-                                        {
-                                            NetworkLog.LogWarning($"{nameof(NetworkPrefab)} ({NetworkConfig.NetworkPrefabs[i].SourcePrefabToOverride.name}) " +
-                                                $"is missing a {nameof(NetworkObject)} component (entry will be ignored).");
-                                        }
-                                        Debug.LogWarning($"{nameof(NetworkPrefab)} override entry (\"{NetworkConfig.NetworkPrefabs[i].SourcePrefabToOverride.name}\") will be removed and ignored.");
-                                        removeEmptyPrefabs.Add(i);
-                                        continue;
-                                    }
-                                    sourcePrefabGlobalObjectIdHash = networkObject.GlobalObjectIdHash;
-                                }
-                                break;
-                            }
-                    }
-
-                    // Validate target prefab override values next
-                    if (NetworkConfig.NetworkPrefabs[i].OverridingTargetPrefab == null)
-                    {
-                        if (NetworkLog.CurrentLogLevel <= LogLevel.Error)
-                        {
-                            NetworkLog.LogWarning($"{nameof(NetworkPrefab)} {nameof(NetworkPrefab.OverridingTargetPrefab)} is null!");
-                        }
-                        removeEmptyPrefabs.Add(i);
-                        switch (NetworkConfig.NetworkPrefabs[i].Override)
-                        {
-                            case NetworkPrefabOverride.Hash:
-                                {
-                                    Debug.LogWarning($"{nameof(NetworkPrefab)} override entry {NetworkConfig.NetworkPrefabs[i].SourceHashToOverride} will be removed and ignored.");
-                                    break;
-                                }
-                            case NetworkPrefabOverride.Prefab:
-                                {
-                                    Debug.LogWarning($"{nameof(NetworkPrefab)} override entry ({NetworkConfig.NetworkPrefabs[i].SourcePrefabToOverride.name}) will be removed and ignored.");
-                                    break;
-                                }
-                        }
-                        continue;
-                    }
-                    else
-                    {
-                        targetPrefabGlobalObjectIdHash = NetworkConfig.NetworkPrefabs[i].OverridingTargetPrefab.GetComponent<NetworkObject>().GlobalObjectIdHash;
-                    }
-                }
-
-                // Assign the appropriate GlobalObjectIdHash to the appropriate NetworkPrefab
-                if (!NetworkConfig.NetworkPrefabOverrideLinks.ContainsKey(sourcePrefabGlobalObjectIdHash))
-                {
-                    if (NetworkConfig.NetworkPrefabs[i].Override == NetworkPrefabOverride.None)
-                    {
-                        NetworkConfig.NetworkPrefabOverrideLinks.Add(sourcePrefabGlobalObjectIdHash, NetworkConfig.NetworkPrefabs[i]);
-                    }
-                    else
-                    {
-                        if (!NetworkConfig.OverrideToNetworkPrefab.ContainsKey(targetPrefabGlobalObjectIdHash))
-                        {
-                            switch (NetworkConfig.NetworkPrefabs[i].Override)
-                            {
-                                case NetworkPrefabOverride.Prefab:
-                                    {
-                                        NetworkConfig.NetworkPrefabOverrideLinks.Add(sourcePrefabGlobalObjectIdHash, NetworkConfig.NetworkPrefabs[i]);
-                                        NetworkConfig.OverrideToNetworkPrefab.Add(targetPrefabGlobalObjectIdHash, sourcePrefabGlobalObjectIdHash);
-                                    }
-                                    break;
-                                case NetworkPrefabOverride.Hash:
-                                    {
-                                        NetworkConfig.NetworkPrefabOverrideLinks.Add(sourcePrefabGlobalObjectIdHash, NetworkConfig.NetworkPrefabs[i]);
-                                        NetworkConfig.OverrideToNetworkPrefab.Add(targetPrefabGlobalObjectIdHash, sourcePrefabGlobalObjectIdHash);
-                                    }
-                                    break;
-                            }
-                        }
-                        else
-                        {
-                            // This can happen if a user tries to make several GlobalObjectIdHash values point to the same target
-                            Debug.LogError($"{nameof(NetworkPrefab)} (\"{networkObject.name}\") has a duplicate {nameof(NetworkObject.GlobalObjectIdHash)} target entry value of: {targetPrefabGlobalObjectIdHash}! Removing entry from list!");
-                            removeEmptyPrefabs.Add(i);
-                        }
-                    }
-                }
-                else
-                {
-                    // This should never happen, but in the case it somehow does log an error and remove the duplicate entry
-                    Debug.LogError($"{nameof(NetworkPrefab)} ({networkObject.name}) has a duplicate {nameof(NetworkObject.GlobalObjectIdHash)} source entry value of: {sourcePrefabGlobalObjectIdHash}! Removing entry from list!");
-                    removeEmptyPrefabs.Add(i);
-                }
-            }
+            InitializePrefabs();
 
             // If we have a player prefab, then we need to verify it is in the list of NetworkPrefabOverrideLinks for client side spawning.
             if (NetworkConfig.PlayerPrefab != null)
             {
-                var playerPrefabNetworkObject = NetworkConfig.PlayerPrefab.GetComponent<NetworkObject>();
-                if (playerPrefabNetworkObject != null)
+                if (NetworkConfig.PlayerPrefab.TryGetComponent<NetworkObject>(out var playerPrefabNetworkObject))
                 {
                     //In the event there is no NetworkPrefab entry (i.e. no override for default player prefab)
                     if (!NetworkConfig.NetworkPrefabOverrideLinks.ContainsKey(playerPrefabNetworkObject
@@ -764,23 +1012,26 @@ namespace Unity.Netcode
                 }
             }
 
-            // Clear out anything that is invalid or not used (for invalid entries we already logged warnings to the user earlier)
-            // Iterate backwards so indices don't shift as we remove
-            for (int i = removeEmptyPrefabs.Count - 1; i >= 0; i--)
-            {
-                NetworkConfig.NetworkPrefabs.RemoveAt(removeEmptyPrefabs[i]);
-            }
-
-            removeEmptyPrefabs.Clear();
-
             NetworkConfig.NetworkTransport.OnTransportEvent += HandleRawTransportPoll;
 
             NetworkConfig.NetworkTransport.Initialize(this);
         }
 
+        private void ClearClients()
+        {
+            PendingClients.Clear();
+            m_ConnectedClients.Clear();
+            m_ConnectedClientsList.Clear();
+            m_ConnectedClientIds.Clear();
+            LocalClient = null;
+            NetworkObject.OrphanChildren.Clear();
+            ClientsToApprove.Clear();
+        }
+
         /// <summary>
         /// Starts a server
         /// </summary>
+        /// <returns>(<see cref="true"/>/<see cref="false"/>) returns true if <see cref="NetworkManager"/> started in server mode successfully.</returns>
         public bool StartServer()
         {
             if (NetworkLog.CurrentLogLevel <= LogLevel.Developer)
@@ -794,23 +1045,38 @@ namespace Unity.Netcode
             }
 
             Initialize(true);
+            IsServer = true;
+            IsClient = false;
+            IsListening = true;
 
-            // If we failed to start then shutdown and notify user that the transport failed to start
-            if (NetworkConfig.NetworkTransport.StartServer())
+            try
             {
-                IsServer = true;
-                IsClient = false;
-                IsListening = true;
+                // If we failed to start then shutdown and notify user that the transport failed to start
+                if (NetworkConfig.NetworkTransport.StartServer())
+                {
+                    SpawnManager.ServerSpawnSceneObjectsOnStartSweep();
 
-                SpawnManager.ServerSpawnSceneObjectsOnStartSweep();
+                    OnServerStarted?.Invoke();
+                    IsApproved = true;
+                    return true;
+                }
+                else
+                {
+                    IsServer = false;
+                    IsClient = false;
+                    IsListening = false;
 
-                OnServerStarted?.Invoke();
-                return true;
+                    Debug.LogError($"Server is shutting down due to network transport start failure of {NetworkConfig.NetworkTransport.GetType().Name}!");
+                    OnTransportFailure?.Invoke();
+                    Shutdown();
+                }
             }
-            else
+            catch (Exception)
             {
-                Debug.LogError($"Server is shutting down due to network transport start failure of {NetworkConfig.NetworkTransport.GetType().Name}!");
-                Shutdown();
+                IsServer = false;
+                IsClient = false;
+                IsListening = false;
+                throw;
             }
 
             return false;
@@ -819,6 +1085,7 @@ namespace Unity.Netcode
         /// <summary>
         /// Starts a client
         /// </summary>
+        /// <returns>(<see cref="true"/>/<see cref="false"/>) returns true if <see cref="NetworkManager"/> started in client mode successfully.</returns>
         public bool StartClient()
         {
             if (NetworkLog.CurrentLogLevel <= LogLevel.Developer)
@@ -837,6 +1104,7 @@ namespace Unity.Netcode
             if (!NetworkConfig.NetworkTransport.StartClient())
             {
                 Debug.LogError($"Client is shutting down due to network transport start failure of {NetworkConfig.NetworkTransport.GetType().Name}!");
+                OnTransportFailure?.Invoke();
                 Shutdown();
                 return false;
             }
@@ -851,6 +1119,7 @@ namespace Unity.Netcode
         /// <summary>
         /// Starts a Host
         /// </summary>
+        /// <returns>(<see cref="true"/>/<see cref="false"/>) returns true if <see cref="NetworkManager"/> started in host mode successfully.</returns>
         public bool StartHost()
         {
             if (NetworkLog.CurrentLogLevel <= LogLevel.Developer)
@@ -865,46 +1134,70 @@ namespace Unity.Netcode
 
             Initialize(true);
 
-            // If we failed to start then shutdown and notify user that the transport failed to start
-            if (!NetworkConfig.NetworkTransport.StartServer())
+            IsServer = true;
+            IsClient = true;
+            IsListening = true;
+
+            try
             {
-                Debug.LogError($"Server is shutting down due to network transport start failure of {NetworkConfig.NetworkTransport.GetType().Name}!");
-                Shutdown();
-                return false;
+                // If we failed to start then shutdown and notify user that the transport failed to start
+                if (!NetworkConfig.NetworkTransport.StartServer())
+                {
+                    Debug.LogError($"Server is shutting down due to network transport start failure of {NetworkConfig.NetworkTransport.GetType().Name}!");
+                    OnTransportFailure?.Invoke();
+                    Shutdown();
+
+                    IsServer = false;
+                    IsClient = false;
+                    IsListening = false;
+
+                    return false;
+                }
+            }
+            catch (Exception)
+            {
+                IsServer = false;
+                IsClient = false;
+                IsListening = false;
+                throw;
             }
 
             MessagingSystem.ClientConnected(ServerClientId);
             LocalClientId = ServerClientId;
             NetworkMetrics.SetConnectionId(LocalClientId);
 
-            IsServer = true;
-            IsClient = true;
-            IsListening = true;
-
-            if (NetworkConfig.ConnectionApproval)
+            if (NetworkConfig.ConnectionApproval && ConnectionApprovalCallback != null)
             {
-                InvokeConnectionApproval(NetworkConfig.ConnectionData, ServerClientId,
-                    (createPlayerObject, playerPrefabHash, approved, position, rotation) =>
+                var response = new ConnectionApprovalResponse();
+                ConnectionApprovalCallback(new ConnectionApprovalRequest { Payload = NetworkConfig.ConnectionData, ClientNetworkId = ServerClientId }, response);
+                if (!response.Approved)
+                {
+                    if (NetworkLog.CurrentLogLevel <= LogLevel.Normal)
                     {
-                        // You cannot decline the local server. Force approved to true
-                        if (!approved)
-                        {
-                            if (NetworkLog.CurrentLogLevel <= LogLevel.Normal)
-                            {
-                                NetworkLog.LogWarning(
-                                    "You cannot decline the host connection. The connection was automatically approved.");
-                            }
-                        }
+                        NetworkLog.LogWarning("You cannot decline the host connection. The connection was automatically approved.");
+                    }
+                }
 
-                        HandleApproval(ServerClientId, createPlayerObject, playerPrefabHash, true, position, rotation);
-                    });
+                response.Approved = true;
+                IsApproved = true;
+                HandleConnectionApproval(ServerClientId, response);
             }
             else
             {
-                HandleApproval(ServerClientId, NetworkConfig.PlayerPrefab != null, null, true, null, null);
+                var response = new ConnectionApprovalResponse
+                {
+                    Approved = true,
+                    CreatePlayerObject = NetworkConfig.PlayerPrefab != null
+                };
+                HandleConnectionApproval(ServerClientId, response);
             }
 
             SpawnManager.ServerSpawnSceneObjectsOnStartSweep();
+
+            // This assures that any in-scene placed NetworkObject is spawned and
+            // any associated NetworkBehaviours' netcode related properties are
+            // set prior to invoking OnClientConnected.
+            InvokeOnClientConnectedCallback(LocalClientId);
 
             OnServerStarted?.Invoke();
 
@@ -930,7 +1223,9 @@ namespace Unity.Netcode
                 return false;
             }
 
-            if (NetworkConfig.ConnectionApproval)
+            // Only if it is starting as a server or host do we need to check this
+            // Clients don't invoke the ConnectionApprovalCallback
+            if (NetworkConfig.ConnectionApproval && type != StartType.Client)
             {
                 if (ConnectionApprovalCallback == null)
                 {
@@ -957,6 +1252,9 @@ namespace Unity.Netcode
             return true;
         }
 
+        /// <summary>
+        /// Set this NetworkManager instance as the static NetworkManager singleton
+        /// </summary>
         public void SetSingleton()
         {
             Singleton = this;
@@ -1061,6 +1359,7 @@ namespace Unity.Netcode
         private void DisconnectRemoteClient(ulong clientId)
         {
             var transportId = ClientIdToTransportId(clientId);
+            MessagingSystem.ProcessSendQueues();
             NetworkConfig.NetworkTransport.DisconnectRemoteClient(transportId);
         }
 
@@ -1081,8 +1380,15 @@ namespace Unity.Netcode
                 NetworkLog.LogInfo(nameof(Shutdown));
             }
 
-            m_ShuttingDown = true;
-            m_StopProcessingMessages = discardMessageQueue;
+            // If we're not running, don't start shutting down, it would only cause an immediate
+            // shutdown the next time the manager is started.
+            if (IsServer || IsClient)
+            {
+                m_ShuttingDown = true;
+                m_StopProcessingMessages = discardMessageQueue;
+            }
+
+            NetworkConfig.NetworkTransport.OnTransportEvent -= HandleRawTransportPoll;
         }
 
         internal void ShutdownInternal()
@@ -1134,13 +1440,27 @@ namespace Unity.Netcode
                 }
             }
 
-            if (IsClient && IsConnectedClient)
+            if (IsClient && IsListening)
             {
                 // Client only, send disconnect to server
                 NetworkConfig.NetworkTransport.DisconnectLocalClient();
             }
 
             IsConnectedClient = false;
+            IsApproved = false;
+
+            // We need to clean up NetworkObjects before we reset the IsServer
+            // and IsClient properties. This provides consistency of these two
+            // property values for NetworkObjects that are still spawned when
+            // the shutdown cycle begins.
+            if (SpawnManager != null)
+            {
+                SpawnManager.DespawnAndDestroyNetworkObjects();
+                SpawnManager.ServerResetShudownStateForSceneObjects();
+
+                SpawnManager = null;
+            }
+
             IsServer = false;
             IsClient = false;
 
@@ -1163,13 +1483,9 @@ namespace Unity.Netcode
                 NetworkConfig.NetworkTransport.OnTransportEvent -= HandleRawTransportPoll;
             }
 
-            if (SpawnManager != null)
+            if (DeferredMessageManager != null)
             {
-                SpawnManager.CleanupAllTriggers();
-                SpawnManager.DespawnAndDestroyNetworkObjects();
-                SpawnManager.ServerResetShudownStateForSceneObjects();
-
-                SpawnManager = null;
+                DeferredMessageManager.CleanupAllTriggers();
             }
 
             if (SceneManager != null)
@@ -1203,9 +1519,11 @@ namespace Unity.Netcode
             IsListening = false;
             m_ShuttingDown = false;
             m_StopProcessingMessages = false;
+
+            ClearClients();
         }
 
-        // INetworkUpdateSystem
+        /// <inheritdoc />
         public void NetworkUpdate(NetworkUpdateStage updateStage)
         {
             switch (updateStage)
@@ -1222,12 +1540,51 @@ namespace Unity.Netcode
             }
         }
 
+        private void ProcessPendingApprovals()
+        {
+            List<ulong> senders = null;
+
+            foreach (var responsePair in ClientsToApprove)
+            {
+                var response = responsePair.Value;
+                var senderId = responsePair.Key;
+
+                if (!response.Pending)
+                {
+                    try
+                    {
+                        HandleConnectionApproval(senderId, response);
+
+                        if (senders == null)
+                        {
+                            senders = new List<ulong>();
+                        }
+                        senders.Add(senderId);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+            }
+
+            if (senders != null)
+            {
+                foreach (var sender in senders)
+                {
+                    ClientsToApprove.Remove(sender);
+                }
+            }
+        }
+
         private void OnNetworkEarlyUpdate()
         {
             if (!IsListening)
             {
                 return;
             }
+
+            ProcessPendingApprovals();
 
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
             s_TransportPoll.Begin();
@@ -1241,6 +1598,7 @@ namespace Unity.Netcode
             } while (IsListening && networkEvent != NetworkEvent.Nothing);
 
             MessagingSystem.ProcessIncomingMessageQueue();
+            MessagingSystem.CleanupDisconnectedClients();
 
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
             s_TransportPoll.End();
@@ -1262,7 +1620,7 @@ namespace Unity.Netcode
             }
 
             // Only update RTT here, server time is updated by time sync messages
-            var reset = NetworkTimeSystem.Advance(Time.deltaTime);
+            var reset = NetworkTimeSystem.Advance(Time.unscaledDeltaTime);
             if (reset)
             {
                 NetworkTickSystem.Reset(NetworkTimeSystem.LocalTime, NetworkTimeSystem.ServerTime);
@@ -1271,7 +1629,7 @@ namespace Unity.Netcode
 
             if (IsServer == false)
             {
-                NetworkTimeSystem.Sync(NetworkTimeSystem.LastSyncedServerTimeSec + Time.deltaTime, NetworkConfig.NetworkTransport.GetCurrentRtt(ServerClientId) / 1000d);
+                NetworkTimeSystem.Sync(NetworkTimeSystem.LastSyncedServerTimeSec + Time.unscaledDeltaTime, NetworkConfig.NetworkTransport.GetCurrentRtt(ServerClientId) / 1000d);
             }
         }
 
@@ -1287,7 +1645,7 @@ namespace Unity.Netcode
 
                 NetworkObject.VerifyParentingStatus();
             }
-            SpawnManager.CleanupStaleTriggers();
+            DeferredMessageManager.CleanupStaleTriggers();
 
             if (m_ShuttingDown)
             {
@@ -1316,32 +1674,100 @@ namespace Unity.Netcode
         {
             var message = new ConnectionRequestMessage
             {
-                ConfigHash = NetworkConfig.GetConfig(),
+                // Since only a remote client will send a connection request,
+                // we should always force the rebuilding of the NetworkConfig hash value
+                ConfigHash = NetworkConfig.GetConfig(false),
                 ShouldSendConnectionData = NetworkConfig.ConnectionApproval,
                 ConnectionData = NetworkConfig.ConnectionData
             };
+
+            message.MessageVersions = new NativeArray<MessageVersionData>(MessagingSystem.MessageHandlers.Length, Allocator.Temp);
+            for (int index = 0; index < MessagingSystem.MessageHandlers.Length; index++)
+            {
+                if (MessagingSystem.MessageTypes[index] != null)
+                {
+                    var type = MessagingSystem.MessageTypes[index];
+                    message.MessageVersions[index] = new MessageVersionData
+                    {
+                        Hash = XXHash.Hash32(type.FullName),
+                        Version = MessagingSystem.GetLocalVersion(type)
+                    };
+                }
+            }
+
             SendMessage(ref message, NetworkDelivery.ReliableSequenced, ServerClientId);
+            message.MessageVersions.Dispose();
         }
 
         private IEnumerator ApprovalTimeout(ulong clientId)
         {
-            NetworkTime timeStarted = LocalTime;
+            var timeStarted = IsServer ? LocalTime.TimeAsFloat : Time.realtimeSinceStartup;
+            var timedOut = false;
+            var connectionApproved = false;
+            var connectionNotApproved = false;
+            var timeoutMarker = timeStarted + NetworkConfig.ClientConnectionBufferTimeout;
 
-            //We yield every frame incase a pending client disconnects and someone else gets its connection id
-            while ((LocalTime - timeStarted).Time < NetworkConfig.ClientConnectionBufferTimeout && PendingClients.ContainsKey(clientId))
+            while (IsListening && !ShutdownInProgress && !timedOut && !connectionApproved)
             {
                 yield return null;
+                // Check if we timed out
+                timedOut = timeoutMarker < (IsServer ? LocalTime.TimeAsFloat : Time.realtimeSinceStartup);
+
+                if (IsServer)
+                {
+                    // When the client is no longer in the pending clients list and is in the connected clients list
+                    // it has been approved
+                    connectionApproved = !PendingClients.ContainsKey(clientId) && ConnectedClients.ContainsKey(clientId);
+
+                    // For the server side, if the client is in neither list then it was declined or the client disconnected
+                    connectionNotApproved = !PendingClients.ContainsKey(clientId) && !ConnectedClients.ContainsKey(clientId);
+                }
+                else
+                {
+                    connectionApproved = IsApproved;
+                }
             }
 
-            if (PendingClients.ContainsKey(clientId) && !ConnectedClients.ContainsKey(clientId))
+            // Exit coroutine if we are no longer listening or a shutdown is in progress (client or server)
+            if (!IsListening || ShutdownInProgress)
+            {
+                yield break;
+            }
+
+            // If the client timed out or was not approved
+            if (timedOut || connectionNotApproved)
             {
                 // Timeout
                 if (NetworkLog.CurrentLogLevel <= LogLevel.Developer)
                 {
-                    NetworkLog.LogInfo($"Client {clientId} Handshake Timed Out");
+                    if (timedOut)
+                    {
+                        if (IsServer)
+                        {
+                            // Log a warning that the transport detected a connection but then did not receive a follow up connection request message.
+                            // (hacking or something happened to the server's network connection)
+                            NetworkLog.LogWarning($"Server detected a transport connection from Client-{clientId}, but timed out waiting for the connection request message.");
+                        }
+                        else
+                        {
+                            // We only provide informational logging for the client side
+                            NetworkLog.LogInfo("Timed out waiting for the server to approve the connection request.");
+                        }
+                    }
+                    else if (connectionNotApproved)
+                    {
+                        NetworkLog.LogInfo($"Client-{clientId} was either denied approval or disconnected while being approved.");
+                    }
                 }
 
-                DisconnectClient(clientId);
+                if (IsServer)
+                {
+                    DisconnectClient(clientId);
+                }
+                else
+                {
+                    Shutdown(true);
+                }
             }
         }
 
@@ -1415,11 +1841,6 @@ namespace Unity.Netcode
                     break;
                 case NetworkEvent.Data:
                     {
-                        if (NetworkLog.CurrentLogLevel <= LogLevel.Developer)
-                        {
-                            NetworkLog.LogInfo($"Incoming Data From {clientId}: {payload.Count} bytes");
-                        }
-
                         clientId = TransportIdToClientId(clientId);
 
                         HandleIncomingData(clientId, payload, receiveTime);
@@ -1436,7 +1857,18 @@ namespace Unity.Netcode
                         NetworkLog.LogInfo($"Disconnect Event From {clientId}");
                     }
 
-                    OnClientDisconnectCallback?.Invoke(clientId);
+                    // Process the incoming message queue so that we get everything from the server disconnecting us
+                    // or, if we are the server, so we got everything from that client.
+                    MessagingSystem.ProcessIncomingMessageQueue();
+
+                    try
+                    {
+                        OnClientDisconnectCallback?.Invoke(clientId);
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.LogException(exception);
+                    }
 
                     if (IsServer)
                     {
@@ -1444,11 +1876,21 @@ namespace Unity.Netcode
                     }
                     else
                     {
-                        Shutdown();
+                        // We must pass true here and not process any sends messages
+                        // as we are no longer connected and thus there is no one to
+                        // send any messages to and this will cause an exception within
+                        // UnityTransport as the client ID is no longer valid.
+                        Shutdown(true);
                     }
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
                     s_TransportDisconnect.End();
 #endif
+                    break;
+
+                case NetworkEvent.TransportFailure:
+                    Debug.LogError($"Shutting down due to network transport failure of {NetworkConfig.NetworkTransport.GetType().Name}!");
+                    OnTransportFailure?.Invoke();
+                    Shutdown(true);
                     break;
             }
         }
@@ -1593,10 +2035,29 @@ namespace Unity.Netcode
         /// <param name="clientId">The ClientId to disconnect</param>
         public void DisconnectClient(ulong clientId)
         {
+            DisconnectClient(clientId, null);
+        }
+
+        /// <summary>
+        /// Disconnects the remote client.
+        /// </summary>
+        /// <param name="clientId">The ClientId to disconnect</param>
+        /// <param name="reason">Disconnection reason. If set, client will receive a DisconnectReasonMessage and have the
+        /// reason available in the NetworkManager.DisconnectReason property</param>
+        public void DisconnectClient(ulong clientId, string reason)
+        {
             if (!IsServer)
             {
                 throw new NotServerException($"Only server can disconnect remote clients. Please use `{nameof(Shutdown)}()` instead.");
             }
+
+            if (!string.IsNullOrEmpty(reason))
+            {
+                var disconnectReason = new DisconnectReasonMessage();
+                disconnectReason.Reason = reason;
+                SendMessage(ref disconnectReason, NetworkDelivery.Reliable, clientId);
+            }
+            MessagingSystem.ProcessSendQueues();
 
             OnClientDisconnectFromServer(clientId);
             DisconnectRemoteClient(clientId);
@@ -1613,13 +2074,20 @@ namespace Unity.Netcode
                     var playerObject = networkClient.PlayerObject;
                     if (playerObject != null)
                     {
-                        if (PrefabHandler.ContainsHandler(ConnectedClients[clientId].PlayerObject.GlobalObjectIdHash))
+                        if (!playerObject.DontDestroyWithOwner)
                         {
-                            PrefabHandler.HandleNetworkPrefabDestroy(ConnectedClients[clientId].PlayerObject);
+                            if (PrefabHandler.ContainsHandler(ConnectedClients[clientId].PlayerObject.GlobalObjectIdHash))
+                            {
+                                PrefabHandler.HandleNetworkPrefabDestroy(ConnectedClients[clientId].PlayerObject);
+                            }
+                            else
+                            {
+                                Destroy(playerObject.gameObject);
+                            }
                         }
                         else
                         {
-                            Destroy(playerObject.gameObject);
+                            playerObject.RemoveOwnership();
                         }
                     }
 
@@ -1714,15 +2182,11 @@ namespace Unity.Netcode
         /// <summary>
         /// Server Side: Handles the approval of a client
         /// </summary>
-        /// <param name="ownerClientId">client being approved</param>
-        /// <param name="createPlayerObject">whether we want to create a player or not</param>
-        /// <param name="playerPrefabHash">the GlobalObjectIdHash value for the Network Prefab to create as the player</param>
-        /// <param name="approved">Is the player approved or not?</param>
-        /// <param name="position">Used when createPlayerObject is true, position of the player when spawned </param>
-        /// <param name="rotation">Used when createPlayerObject is true, rotation of the player when spawned</param>
-        internal void HandleApproval(ulong ownerClientId, bool createPlayerObject, uint? playerPrefabHash, bool approved, Vector3? position, Quaternion? rotation)
+        /// <param name="ownerClientId">The Network Id of the client being approved</param>
+        /// <param name="response">The response to allow the player in or not, with its parameters</param>
+        internal void HandleConnectionApproval(ulong ownerClientId, ConnectionApprovalResponse response)
         {
-            if (approved)
+            if (response.Approved)
             {
                 // Inform new client it got approved
                 PendingClients.Remove(ownerClientId);
@@ -1732,10 +2196,37 @@ namespace Unity.Netcode
                 m_ConnectedClientsList.Add(client);
                 m_ConnectedClientIds.Add(client.ClientId);
 
-                if (createPlayerObject)
+                if (response.CreatePlayerObject)
                 {
-                    var networkObject = SpawnManager.CreateLocalNetworkObject(false, playerPrefabHash ?? NetworkConfig.PlayerPrefab.GetComponent<NetworkObject>().GlobalObjectIdHash, ownerClientId, null, position, rotation);
-                    SpawnManager.SpawnNetworkObjectLocally(networkObject, SpawnManager.GetNetworkObjectId(), false, true, ownerClientId, false);
+                    var playerPrefabHash = response.PlayerPrefabHash ?? NetworkConfig.PlayerPrefab.GetComponent<NetworkObject>().GlobalObjectIdHash;
+
+                    // Generate a SceneObject for the player object to spawn
+                    var sceneObject = new NetworkObject.SceneObject
+                    {
+                        OwnerClientId = ownerClientId,
+                        IsPlayerObject = true,
+                        IsSceneObject = false,
+                        HasTransform = true,
+                        Hash = playerPrefabHash,
+                        TargetClientId = ownerClientId,
+                        Transform = new NetworkObject.SceneObject.TransformData
+                        {
+                            Position = response.Position.GetValueOrDefault(),
+                            Rotation = response.Rotation.GetValueOrDefault()
+                        }
+                    };
+
+                    // Create the player NetworkObject locally
+                    var networkObject = SpawnManager.CreateLocalNetworkObject(sceneObject);
+
+                    // Spawn the player NetworkObject locally
+                    SpawnManager.SpawnNetworkObjectLocally(
+                        networkObject,
+                        SpawnManager.GetNetworkObjectId(),
+                        sceneObject: false,
+                        playerObject: true,
+                        ownerClientId,
+                        destroyWithScene: false);
 
                     ConnectedClients[ownerClientId].PlayerObject = networkObject;
                 }
@@ -1756,7 +2247,22 @@ namespace Unity.Netcode
                         }
                     }
 
+                    message.MessageVersions = new NativeArray<MessageVersionData>(MessagingSystem.MessageHandlers.Length, Allocator.Temp);
+                    for (int index = 0; index < MessagingSystem.MessageHandlers.Length; index++)
+                    {
+                        if (MessagingSystem.MessageTypes[index] != null)
+                        {
+                            var type = MessagingSystem.MessageTypes[index];
+                            message.MessageVersions[index] = new MessageVersionData
+                            {
+                                Hash = XXHash.Hash32(type.FullName),
+                                Version = MessagingSystem.GetLocalVersion(type)
+                            };
+                        }
+                    }
+
                     SendMessage(ref message, NetworkDelivery.ReliableFragmentedSequenced, ownerClientId);
+                    message.MessageVersions.Dispose();
 
                     // If scene management is enabled, then let NetworkSceneManager handle the initial scene and NetworkObject synchronization
                     if (!NetworkConfig.EnableSceneManagement)
@@ -1772,19 +2278,27 @@ namespace Unity.Netcode
                 {
                     LocalClient = client;
                     SpawnManager.UpdateObservedNetworkObjects(ownerClientId);
-                    InvokeOnClientConnectedCallback(ownerClientId);
                 }
 
-                if (!createPlayerObject || (playerPrefabHash == null && NetworkConfig.PlayerPrefab == null))
+                if (!response.CreatePlayerObject || (response.PlayerPrefabHash == null && NetworkConfig.PlayerPrefab == null))
                 {
                     return;
                 }
 
                 // Separating this into a contained function call for potential further future separation of when this notification is sent.
-                ApprovedPlayerSpawn(ownerClientId, playerPrefabHash ?? NetworkConfig.PlayerPrefab.GetComponent<NetworkObject>().GlobalObjectIdHash);
+                ApprovedPlayerSpawn(ownerClientId, response.PlayerPrefabHash ?? NetworkConfig.PlayerPrefab.GetComponent<NetworkObject>().GlobalObjectIdHash);
             }
             else
             {
+                if (!string.IsNullOrEmpty(response.Reason))
+                {
+                    var disconnectReason = new DisconnectReasonMessage();
+                    disconnectReason.Reason = response.Reason;
+                    SendMessage(ref disconnectReason, NetworkDelivery.Reliable, ownerClientId);
+
+                    MessagingSystem.ProcessSendQueues();
+                }
+
                 PendingClients.Remove(ownerClientId);
                 DisconnectRemoteClient(ownerClientId);
             }
@@ -1811,11 +2325,11 @@ namespace Unity.Netcode
                 {
                     ObjectInfo = ConnectedClients[clientId].PlayerObject.GetMessageSceneObject(clientPair.Key)
                 };
-                message.ObjectInfo.Header.Hash = playerPrefabHash;
-                message.ObjectInfo.Header.IsSceneObject = false;
-                message.ObjectInfo.Header.HasParent = false;
-                message.ObjectInfo.Header.IsPlayerObject = true;
-                message.ObjectInfo.Header.OwnerClientId = clientId;
+                message.ObjectInfo.Hash = playerPrefabHash;
+                message.ObjectInfo.IsSceneObject = false;
+                message.ObjectInfo.HasParent = false;
+                message.ObjectInfo.IsPlayerObject = true;
+                message.ObjectInfo.OwnerClientId = clientId;
                 var size = SendMessage(ref message, NetworkDelivery.ReliableFragmentedSequenced, clientPair.Key);
                 NetworkMetrics.TrackObjectSpawnSent(clientPair.Key, ConnectedClients[clientId].PlayerObject, size);
             }
