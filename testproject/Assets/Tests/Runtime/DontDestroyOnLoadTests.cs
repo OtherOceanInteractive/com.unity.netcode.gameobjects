@@ -1,10 +1,10 @@
 using System.Collections;
-using UnityEngine;
 using NUnit.Framework;
-using UnityEngine.TestTools;
+using TestProject.ManualTests;
 using Unity.Netcode;
 using Unity.Netcode.TestHelpers.Runtime;
-using TestProject.ManualTests;
+using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace TestProject.RuntimeTests
 {
@@ -41,13 +41,13 @@ namespace TestProject.RuntimeTests
             // Set the player prefab
             server.NetworkConfig.PlayerPrefab = m_PlayerPrefab;
             // Add our test NetworkObject to be moved into the DontDestroyOnLoad scene
-            server.NetworkConfig.NetworkPrefabs.Add(new NetworkPrefab() { Override = NetworkPrefabOverride.None, Prefab = m_DontDestroyOnLoadObject });
+            server.NetworkConfig.Prefabs.Add(new NetworkPrefab() { Override = NetworkPrefabOverride.None, Prefab = m_DontDestroyOnLoadObject });
 
             // Apply the same settings for the clients
             for (int i = 0; i < clients.Length; i++)
             {
                 clients[i].NetworkConfig.PlayerPrefab = m_PlayerPrefab;
-                clients[i].NetworkConfig.NetworkPrefabs.Add(new NetworkPrefab() { Override = NetworkPrefabOverride.None, Prefab = m_DontDestroyOnLoadObject });
+                clients[i].NetworkConfig.Prefabs.Add(new NetworkPrefab() { Override = NetworkPrefabOverride.None, Prefab = m_DontDestroyOnLoadObject });
             }
 
             m_ServerNetworkManager = server;
@@ -79,7 +79,12 @@ namespace TestProject.RuntimeTests
             m_ServerNetworkManager = null;
             m_ClientNetworkManagers = null;
 
+#if UNITY_2023_1_OR_NEWER
+            var networkObjects = Object.FindObjectsByType<NetworkObject>(FindObjectsSortMode.InstanceID);
+#else
             var networkObjects = Object.FindObjectsOfType<NetworkObject>();
+#endif
+
             foreach (var netObject in networkObjects)
             {
                 Object.DestroyImmediate(netObject);

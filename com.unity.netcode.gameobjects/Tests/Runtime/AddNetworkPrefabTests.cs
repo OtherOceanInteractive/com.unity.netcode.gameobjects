@@ -1,8 +1,8 @@
 using System.Collections;
 using NUnit.Framework;
+using Unity.Netcode.TestHelpers.Runtime;
 using UnityEngine;
 using UnityEngine.TestTools;
-using Unity.Netcode.TestHelpers.Runtime;
 using Object = UnityEngine.Object;
 
 namespace Unity.Netcode.RuntimeTests
@@ -45,14 +45,18 @@ namespace Unity.Netcode.RuntimeTests
 
         private EmptyComponent GetObjectForClient(ulong clientId)
         {
-            foreach (var component in Object.FindObjectsOfType<EmptyComponent>())
+#if UNITY_2023_1_OR_NEWER
+            var emptyComponents = Object.FindObjectsByType<EmptyComponent>(FindObjectsSortMode.InstanceID);
+#else
+            var emptyComponents = Object.FindObjectsOfType<EmptyComponent>();
+#endif
+            foreach (var component in emptyComponents)
             {
                 if (component.IsSpawned && component.NetworkManager.LocalClientId == clientId)
                 {
                     return component;
                 }
             }
-
             return null;
         }
 

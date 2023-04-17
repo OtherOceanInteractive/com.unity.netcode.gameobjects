@@ -56,12 +56,14 @@ namespace TestProject.RuntimeTests
             // Make it a prefab
             NetcodeIntegrationTestHelpers.MakeNetworkObjectTestPrefab(networkObject);
 
-            var validNetworkPrefab = new NetworkPrefab();
-            validNetworkPrefab.Prefab = m_Prefab;
-            server.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+            var validNetworkPrefab = new NetworkPrefab
+            {
+                Prefab = m_Prefab
+            };
+            server.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             foreach (var client in clients)
             {
-                client.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+                client.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             }
 
             // Start the instances
@@ -88,7 +90,13 @@ namespace TestProject.RuntimeTests
             const int expectedNetworkObjects = numClients + 2; // +2 = one for prefab, one for server.
             const int maxFrames = 240;
             var doubleCheckTime = Time.realtimeSinceStartup + 5.0f;
-            while (Object.FindObjectsOfType<NetworkObject>().Length != expectedNetworkObjects)
+#if UNITY_2023_1_OR_NEWER
+            var networkObjects = Object.FindObjectsByType<NetworkObject>(FindObjectsSortMode.InstanceID);
+#else
+            var networkObjects = Object.FindObjectsOfType<NetworkObject>();
+#endif
+
+            while (networkObjects.Length != expectedNetworkObjects)
             {
                 if (Time.frameCount > maxFrames)
                 {
@@ -102,6 +110,11 @@ namespace TestProject.RuntimeTests
                 }
                 var nextFrameNumber = Time.frameCount + 1;
                 yield return new WaitUntil(() => Time.frameCount >= nextFrameNumber);
+#if UNITY_2023_1_OR_NEWER
+                networkObjects = Object.FindObjectsByType<NetworkObject>(FindObjectsSortMode.InstanceID);
+#else
+                networkObjects = Object.FindObjectsOfType<NetworkObject>();
+#endif
             }
 
             serverObject.GetComponent<NetworkVariableInitOnNetworkSpawn>().Variable.Value = NetworkVariableInitOnNetworkSpawn.ExpectedSpawnValueOnClient;

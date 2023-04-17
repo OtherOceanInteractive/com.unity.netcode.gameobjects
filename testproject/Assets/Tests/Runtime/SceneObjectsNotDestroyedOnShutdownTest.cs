@@ -3,11 +3,11 @@ using System;
 using System.Collections;
 using System.Linq;
 using NUnit.Framework;
-using UnityEngine;
-using UnityEngine.TestTools;
-using UnityEngine.SceneManagement;
 using Unity.Netcode;
 using Unity.Netcode.TestHelpers.Runtime;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.TestTools;
 using Object = UnityEngine.Object;
 
 namespace TestProject.RuntimeTests
@@ -26,8 +26,10 @@ namespace TestProject.RuntimeTests
         {
             m_NetworkManagerGameObject = new GameObject();
             m_ClientNetworkManager = m_NetworkManagerGameObject.AddComponent<NetworkManager>();
-            m_ClientNetworkManager.NetworkConfig = new NetworkConfig();
-            m_ClientNetworkManager.NetworkConfig.NetworkTransport = m_NetworkManagerGameObject.AddComponent<BlankTestingTransport>();
+            m_ClientNetworkManager.NetworkConfig = new NetworkConfig
+            {
+                NetworkTransport = m_NetworkManagerGameObject.AddComponent<BlankTestingTransport>()
+            };
             SceneManager.sceneLoaded += SceneManager_sceneLoaded;
             SceneManager.LoadSceneAsync(k_TestScene, LoadSceneMode.Additive);
         }
@@ -49,7 +51,11 @@ namespace TestProject.RuntimeTests
             yield return NetcodeIntegrationTest.WaitForConditionOrTimeOut(() => m_TestScene.IsValid() && m_TestScene.isLoaded, timeoutHelper);
             Assert.False(timeoutHelper.TimedOut, "Timed out waiting for scene to load!");
 
+#if UNITY_2023_1_OR_NEWER
+            var loadedInSceneObject = Object.FindObjectsByType<NetworkObject>(FindObjectsSortMode.InstanceID).Where((c) => c.name == k_SceneObjectName).FirstOrDefault();
+#else
             var loadedInSceneObject = Object.FindObjectsOfType<NetworkObject>().Where((c) => c.name == k_SceneObjectName).FirstOrDefault();
+#endif
 
             Assert.IsNotNull(loadedInSceneObject, $"Failed to find {k_SceneObjectName} before starting client!");
 
@@ -66,7 +72,11 @@ namespace TestProject.RuntimeTests
             yield return m_DefaultWaitForTick;
 
             // Find the same object
+#if UNITY_2023_1_OR_NEWER
+            loadedInSceneObject = Object.FindObjectsByType<NetworkObject>(FindObjectsSortMode.InstanceID).Where((c) => c.name == k_SceneObjectName).FirstOrDefault();
+#else
             loadedInSceneObject = Object.FindObjectsOfType<NetworkObject>().Where((c) => c.name == k_SceneObjectName).FirstOrDefault();
+#endif
 
             // Verify it still exists
             Assert.IsNotNull(loadedInSceneObject, $"Failed to find {k_SceneObjectName} after starting client!");

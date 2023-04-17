@@ -1,9 +1,9 @@
 using System.Collections;
 using System.Collections.Generic;
-using Unity.Netcode;
-using Unity.Netcode.TestHelpers.Runtime;
 using NUnit.Framework;
 using TestProject.RuntimeTests.Support;
+using Unity.Netcode;
+using Unity.Netcode.TestHelpers.Runtime;
 using UnityEngine;
 using UnityEngine.TestTools;
 
@@ -57,12 +57,14 @@ namespace TestProject.RuntimeTests
             // Make it a prefab
             NetcodeIntegrationTestHelpers.MakeNetworkObjectTestPrefab(networkObject);
 
-            var validNetworkPrefab = new NetworkPrefab();
-            validNetworkPrefab.Prefab = m_Prefab;
-            server.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+            var validNetworkPrefab = new NetworkPrefab
+            {
+                Prefab = m_Prefab
+            };
+            server.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             foreach (var client in clients)
             {
-                client.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+                client.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             }
 
             // Start the instances
@@ -114,12 +116,14 @@ namespace TestProject.RuntimeTests
                 clientHandlers.Add(clientHandler);
             }
 
-            var validNetworkPrefab = new NetworkPrefab();
-            validNetworkPrefab.Prefab = m_Prefab;
-            m_ServerNetworkManager.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+            var validNetworkPrefab = new NetworkPrefab
+            {
+                Prefab = m_Prefab
+            };
+            m_ServerNetworkManager.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             foreach (var client in m_ClientNetworkManagers)
             {
-                client.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+                client.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             }
 
             // Start the instances
@@ -214,12 +218,14 @@ namespace TestProject.RuntimeTests
                 client.PrefabHandler.AddHandler(networkObject, handler);
             }
 
-            var validNetworkPrefab = new NetworkPrefab();
-            validNetworkPrefab.Prefab = m_Prefab;
-            server.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+            var validNetworkPrefab = new NetworkPrefab
+            {
+                Prefab = m_Prefab
+            };
+            server.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             foreach (var client in clients)
             {
-                client.NetworkConfig.NetworkPrefabs.Add(validNetworkPrefab);
+                client.NetworkConfig.Prefabs.Add(validNetworkPrefab);
             }
 
             var waitForTickInterval = new WaitForSeconds(1.0f / server.NetworkConfig.TickRate);

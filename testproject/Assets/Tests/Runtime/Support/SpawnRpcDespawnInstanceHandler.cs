@@ -1,5 +1,5 @@
-using Unity.Netcode;
 using NUnit.Framework;
+using Unity.Netcode;
 using UnityEngine;
 
 namespace TestProject.RuntimeTests.Support
@@ -24,17 +24,17 @@ namespace TestProject.RuntimeTests.Support
 
             // See if there is a valid registered NetworkPrefabOverrideLink associated with the provided prefabHash
             GameObject networkPrefabReference = null;
-            if (NetworkManager.Singleton.NetworkConfig.NetworkPrefabOverrideLinks.ContainsKey(m_PrefabHash))
+            if (NetworkManager.Singleton.NetworkConfig.Prefabs.NetworkPrefabOverrideLinks.ContainsKey(m_PrefabHash))
             {
-                switch (NetworkManager.Singleton.NetworkConfig.NetworkPrefabOverrideLinks[m_PrefabHash].Override)
+                switch (NetworkManager.Singleton.NetworkConfig.Prefabs.NetworkPrefabOverrideLinks[m_PrefabHash].Override)
                 {
                     default:
                     case NetworkPrefabOverride.None:
-                        networkPrefabReference = NetworkManager.Singleton.NetworkConfig.NetworkPrefabOverrideLinks[m_PrefabHash].Prefab;
+                        networkPrefabReference = NetworkManager.Singleton.NetworkConfig.Prefabs.NetworkPrefabOverrideLinks[m_PrefabHash].Prefab;
                         break;
                     case NetworkPrefabOverride.Hash:
                     case NetworkPrefabOverride.Prefab:
-                        networkPrefabReference = NetworkManager.Singleton.NetworkConfig.NetworkPrefabOverrideLinks[m_PrefabHash].OverridingTargetPrefab;
+                        networkPrefabReference = NetworkManager.Singleton.NetworkConfig.Prefabs.NetworkPrefabOverrideLinks[m_PrefabHash].OverridingTargetPrefab;
                         break;
                 }
             }

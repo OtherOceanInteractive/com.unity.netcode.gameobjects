@@ -1,9 +1,9 @@
 using System.Collections;
 using System.Linq;
 using NUnit.Framework;
+using Unity.Netcode.TestHelpers.Runtime;
 using UnityEngine;
 using UnityEngine.TestTools;
-using Unity.Netcode.TestHelpers.Runtime;
 
 namespace Unity.Netcode.RuntimeTests
 {
@@ -15,32 +15,18 @@ namespace Unity.Netcode.RuntimeTests
         }
 
         protected override int NumberOfClients => 1;
-        private NetworkPrefab m_NetworkPrefab;
+        private GameObject m_NetworkObject;
+
         protected override void OnServerAndClientsCreated()
         {
-            // create prefab
-            var gameObject = new GameObject("ClientOwnedObject");
-            var networkObject = gameObject.AddComponent<NetworkObject>();
-            gameObject.AddComponent<DummyNetworkBehaviour>();
-            NetcodeIntegrationTestHelpers.MakeNetworkObjectTestPrefab(networkObject);
-
-            m_NetworkPrefab = (new NetworkPrefab()
-            {
-                Prefab = gameObject
-            });
-
-            m_ServerNetworkManager.NetworkConfig.NetworkPrefabs.Add(m_NetworkPrefab);
-
-            foreach (var client in m_ClientNetworkManagers)
-            {
-                client.NetworkConfig.NetworkPrefabs.Add(m_NetworkPrefab);
-            }
+            m_NetworkObject = CreateNetworkObjectPrefab("ClientOwnedObject");
+            m_NetworkObject.gameObject.AddComponent<DummyNetworkBehaviour>();
         }
 
         [UnityTest]
         public IEnumerator ChangeOwnershipOwnedObjectsAddTest()
         {
-            NetworkObject serverObject = Object.Instantiate(m_NetworkPrefab.Prefab).GetComponent<NetworkObject>();
+            NetworkObject serverObject = m_NetworkObject.GetComponent<NetworkObject>();
             serverObject.NetworkManagerOwner = m_ServerNetworkManager;
             serverObject.Spawn();
 
@@ -64,7 +50,7 @@ namespace Unity.Netcode.RuntimeTests
         [UnityTest]
         public IEnumerator WhenOwnershipIsChanged_OwnershipValuesUpdateCorrectly()
         {
-            NetworkObject serverObject = Object.Instantiate(m_NetworkPrefab.Prefab).GetComponent<NetworkObject>();
+            NetworkObject serverObject = m_NetworkObject.GetComponent<NetworkObject>();
             serverObject.NetworkManagerOwner = m_ServerNetworkManager;
             serverObject.Spawn();
 
@@ -89,7 +75,12 @@ namespace Unity.Netcode.RuntimeTests
             Assert.IsFalse(serverBehaviour.IsOwnedByServer);
             Assert.AreEqual(m_ClientNetworkManagers[0].LocalClientId, serverBehaviour.OwnerClientId);
 
+#if UNITY_2023_1_OR_NEWER
+            var clientObject = Object.FindObjectsByType<NetworkObject>(FindObjectsSortMode.InstanceID).Where((obj) => obj.NetworkManagerOwner == m_ClientNetworkManagers[0]).FirstOrDefault();
+#else
             var clientObject = Object.FindObjectsOfType<NetworkObject>().Where((obj) => obj.NetworkManagerOwner == m_ClientNetworkManagers[0]).FirstOrDefault();
+#endif
+
 
             Assert.IsNotNull(clientObject);
             Assert.IsTrue(clientObject.IsOwner);

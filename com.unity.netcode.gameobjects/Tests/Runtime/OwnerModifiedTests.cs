@@ -1,9 +1,9 @@
 using System.Collections;
 using System.Collections.Generic;
 using NUnit.Framework;
+using Unity.Netcode.TestHelpers.Runtime;
 using UnityEngine;
 using UnityEngine.TestTools;
-using Unity.Netcode.TestHelpers.Runtime;
 
 namespace Unity.Netcode.RuntimeTests
 {
@@ -16,7 +16,7 @@ namespace Unity.Netcode.RuntimeTests
     {
         public NetworkList<int> MyNetworkList;
 
-        static internal int Updates = 0;
+        internal static int Updates = 0;
 
         private void Awake()
         {
@@ -91,10 +91,10 @@ namespace Unity.Netcode.RuntimeTests
                 ownerModLastClient.NetworkUpdateStageToCheck = (NetworkUpdateStage)updateLoopType;
                 Debug.Log($"Testing Update Stage: {ownerModLastClient.NetworkUpdateStageToCheck}");
                 ownerModLastClient.AddValues = true;
-                yield return NetcodeIntegrationTestHelpers.WaitForTicks(m_ServerNetworkManager, 5);
+                yield return WaitForTicks(m_ServerNetworkManager, 5);
             }
 
-            yield return NetcodeIntegrationTestHelpers.WaitForTicks(m_ServerNetworkManager, 5);
+            yield return WaitForTicks(m_ServerNetworkManager, 5);
 
             // We'll have at least one update per stage per client, if all goes well.
             Assert.True(OwnerModifiedObject.Updates > 20);

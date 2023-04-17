@@ -1,8 +1,9 @@
 using System;
 using System.Collections.Generic;
-using UnityEngine;
 using System.Linq;
 using Unity.Collections;
+using UnityEngine;
+using UnityEngine.Serialization;
 
 namespace Unity.Netcode
 {
@@ -30,20 +31,8 @@ namespace Unity.Netcode
         [Tooltip("When set, NetworkManager will automatically create and spawn the assigned player prefab. This can be overridden by adding it to the NetworkPrefabs list and selecting override.")]
         public GameObject PlayerPrefab;
 
-        /// <summary>
-        /// A list of prefabs that can be dynamically spawned.
-        /// </summary>
         [SerializeField]
-        [Tooltip("The prefabs that can be spawned across the network")]
-        internal List<NetworkPrefab> NetworkPrefabs = new List<NetworkPrefab>();
-
-        /// <summary>
-        /// This dictionary provides a quick way to check and see if a NetworkPrefab has a NetworkPrefab override.
-        /// Generated at runtime and OnValidate
-        /// </summary>
-        internal Dictionary<uint, NetworkPrefab> NetworkPrefabOverrideLinks = new Dictionary<uint, NetworkPrefab>();
-
-        internal Dictionary<uint, uint> OverrideToNetworkPrefab = new Dictionary<uint, uint>();
+        public NetworkPrefabs Prefabs = new NetworkPrefabs();
 
 
         /// <summary>
@@ -167,7 +156,7 @@ namespace Unity.Netcode
         public string ToBase64()
         {
             NetworkConfig config = this;
-            var writer = new FastBufferWriter(MessagingSystem.NON_FRAGMENTED_MESSAGE_MAX_SIZE, Allocator.Temp);
+            var writer = new FastBufferWriter(NetworkMessageManager.NonFragmentedMessageMaxSize, Allocator.Temp);
             using (writer)
             {
                 writer.WriteValueSafe(config.ProtocolVersion);
@@ -220,6 +209,14 @@ namespace Unity.Netcode
         private ulong? m_ConfigHash = null;
 
         /// <summary>
+        /// Clears out the configuration hash value generated for a specific network session
+        /// </summary>
+        internal void ClearConfigHash()
+        {
+            m_ConfigHash = null;
+        }
+
+        /// <summary>
         /// Gets a SHA256 hash of parts of the NetworkConfig instance
         /// </summary>
         /// <param name="cache"></param>
@@ -231,7 +228,7 @@ namespace Unity.Netcode
                 return m_ConfigHash.Value;
             }
 
-            var writer = new FastBufferWriter(MessagingSystem.NON_FRAGMENTED_MESSAGE_MAX_SIZE, Allocator.Temp, int.MaxValue);
+            var writer = new FastBufferWriter(NetworkMessageManager.NonFragmentedMessageMaxSize, Allocator.Temp, int.MaxValue);
             using (writer)
             {
                 writer.WriteValueSafe(ProtocolVersion);
@@ -239,7 +236,7 @@ namespace Unity.Netcode
 
                 if (ForceSamePrefabs)
                 {
-                    var sortedDictionary = NetworkPrefabOverrideLinks.OrderBy(x => x.Key);
+                    var sortedDictionary = Prefabs.NetworkPrefabOverrideLinks.OrderBy(x => x.Key);
                     foreach (var sortedEntry in sortedDictionary)
 
                     {
@@ -273,6 +270,75 @@ namespace Unity.Netcode
         {
             return hash == GetConfig();
         }
+
+        internal void InitializePrefabs()
+        {
+            if (HasOldPrefabList())
+            {
+                MigrateOldNetworkPrefabsToNetworkPrefabsList();
+            }
+
+            Prefabs.Initialize();
+        }
+
+        [NonSerialized]
+        private bool m_DidWarnOldPrefabList = false;
+
+        private void WarnOldPrefabList()
+        {
+            if (!m_DidWarnOldPrefabList)
+            {
+                Debug.LogWarning("Using Legacy Network Prefab List. Consider Migrating.");
+                m_DidWarnOldPrefabList = true;
+            }
+        }
+
+        /// <summary>
+        /// Returns true if the old List&lt;NetworkPrefab&gt; serialized data is present.
+        /// </summary>
+        /// <remarks>
+        /// Internal use only to help migrate projects. <seealso cref="MigrateOldNetworkPrefabsToNetworkPrefabsList"/></remarks>
+        internal bool HasOldPrefabList()
+        {
+            return OldPrefabList?.Count > 0;
+        }
+
+        /// <summary>
+        /// Migrate the old format List&lt;NetworkPrefab&gt; prefab registration to the new NetworkPrefabsList ScriptableObject.
+        /// </summary>
+        /// <remarks>
+        /// OnAfterDeserialize cannot instantiate new objects (e.g. NetworkPrefabsList SO) since it executes in a thread, so we have to do it later.
+        /// Since NetworkConfig isn't a Unity.Object it doesn't get an Awake callback, so we have to do this in NetworkManager and expose this API.
+        /// </remarks>
+        internal NetworkPrefabsList MigrateOldNetworkPrefabsToNetworkPrefabsList()
+        {
+            if (OldPrefabList == null || OldPrefabList.Count == 0)
+            {
+                return null;
+            }
+
+            if (Prefabs == null)
+            {
+                throw new Exception("Prefabs field is null.");
+            }
+
+            Prefabs.NetworkPrefabsLists.Add(ScriptableObject.CreateInstance<NetworkPrefabsList>());
+
+            if (OldPrefabList?.Count > 0)
+            {
+                // Migrate legacy types/fields
+                foreach (var networkPrefab in OldPrefabList)
+                {
+                    Prefabs.NetworkPrefabsLists[Prefabs.NetworkPrefabsLists.Count - 1].Add(networkPrefab);
+                }
+            }
+
+            OldPrefabList = null;
+            return Prefabs.NetworkPrefabsLists[Prefabs.NetworkPrefabsLists.Count - 1];
+        }
+
+        [FormerlySerializedAs("NetworkPrefabs")]
+        [SerializeField]
+        internal List<NetworkPrefab> OldPrefabList;
     }
 }
-

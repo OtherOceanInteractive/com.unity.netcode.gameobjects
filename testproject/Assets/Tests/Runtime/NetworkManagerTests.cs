@@ -1,9 +1,9 @@
+using System.Collections;
 using NUnit.Framework;
-using UnityEngine;
-using UnityEngine.SceneManagement;
 using Unity.Netcode;
 using Unity.Netcode.TestHelpers.Runtime;
-using System.Collections;
+using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace TestProject.RuntimeTests
 {
@@ -53,8 +53,11 @@ namespace TestProject.RuntimeTests
             {
                 return false;
             }
-
+#if UNITY_2023_1_OR_NEWER
+            m_NetworkObjectTestComponent = Object.FindFirstObjectByType<NetworkObjectTestComponent>();
+#else
             m_NetworkObjectTestComponent = Object.FindObjectOfType<NetworkObjectTestComponent>();
+#endif
             if (m_NetworkObjectTestComponent == null)
             {
                 return false;

@@ -2,9 +2,9 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
+using Unity.Netcode.TestHelpers.Runtime;
 using UnityEngine;
 using UnityEngine.TestTools;
-using Unity.Netcode.TestHelpers.Runtime;
 using Object = UnityEngine.Object;
 
 namespace Unity.Netcode.RuntimeTests
@@ -183,6 +183,11 @@ namespace Unity.Netcode.RuntimeTests
         /// </summary>
         private IEnumerator StartClientsAndServer(bool useHost, int numberOfClients, GameObject prefabObject)
         {
+            void AddNetworkPrefab(NetworkConfig config, NetworkPrefab prefab)
+            {
+                config.Prefabs.Add(prefab);
+            }
+
             // Sanity check to make sure we are not trying to create more clients than we have available to use
             Assert.True(numberOfClients <= m_ClientNetworkManagers.Length);
             m_ActiveClientsForCurrentTest = new List<NetworkManager>();
@@ -194,12 +199,13 @@ namespace Unity.Netcode.RuntimeTests
             }
 
             // Add the prefab to be used for this particular test iteration
-            m_ServerNetworkManager.NetworkConfig.NetworkPrefabs.Add(new NetworkPrefab() { Prefab = prefabObject });
+            var np = new NetworkPrefab { Prefab = prefabObject };
+            AddNetworkPrefab(m_ServerNetworkManager.NetworkConfig, np);
             m_ServerNetworkManager.NetworkConfig.TickRate = 30;
             foreach (var clientManager in m_ActiveClientsForCurrentTest)
             {
                 m_ServerNetworkManager.NetworkConfig.TickRate = 30;
-                clientManager.NetworkConfig.NetworkPrefabs.Add(new NetworkPrefab() { Prefab = prefabObject });
+                AddNetworkPrefab(clientManager.NetworkConfig, np);
             }
 
             // Now spin everything up normally
@@ -306,7 +312,7 @@ namespace Unity.Netcode.RuntimeTests
             }
 
             // Update the NetworkBehaviours to make sure all network variables are no longer marked as dirty
-            m_ServerNetworkManager.BehaviourUpdater.NetworkBehaviourUpdate(m_ServerNetworkManager);
+            m_ServerNetworkManager.BehaviourUpdater.NetworkBehaviourUpdate();
 
             // Verify that all network variables are no longer dirty on server side only if we have clients (including host)
             foreach (var serverSpawnedObject in spawnedPrefabs)

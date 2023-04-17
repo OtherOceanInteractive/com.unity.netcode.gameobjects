@@ -145,7 +145,7 @@ namespace Unity.Netcode.Transports.UTP
 
         // Maximum reliable throughput, assuming the full reliable window can be sent on every
         // frame at 60 FPS. This will be a large over-estimation in any realistic scenario.
-        private const int k_MaxReliableThroughput = (NetworkParameterConstants.MTU * 32 * 60) / 1000; // bytes per millisecond
+        private const int k_MaxReliableThroughput = (NetworkParameterConstants.MTU * 64 * 60) / 1000; // bytes per millisecond
 
         private static ConnectionAddressData s_DefaultConnectionAddressData = new ConnectionAddressData { Address = "127.0.0.1", Port = 7777, ServerListenAddress = string.Empty };
 
@@ -303,20 +303,23 @@ namespace Unity.Netcode.Transports.UTP
             public ushort Port;
 
             /// <summary>
-            /// IP address the server will listen on. If not provided, will use 'Address'.
+            /// IP address the server will listen on. If not provided, will use localhost.
             /// </summary>
-            [Tooltip("IP address the server will listen on. If not provided, will use 'Address'.")]
+            [Tooltip("IP address the server will listen on. If not provided, will use localhost.")]
             [SerializeField]
             public string ServerListenAddress;
 
-            private static NetworkEndpoint ParseNetworkEndpoint(string ip, ushort port)
+            private static NetworkEndpoint ParseNetworkEndpoint(string ip, ushort port, bool silent = false)
             {
                 NetworkEndpoint endpoint = default;
 
                 if (!NetworkEndpoint.TryParse(ip, port, out endpoint, NetworkFamily.Ipv4) &&
                     !NetworkEndpoint.TryParse(ip, port, out endpoint, NetworkFamily.Ipv6))
                 {
-                    Debug.LogError($"Invalid network endpoint: {ip}:{port}.");
+                    if (!silent)
+                    {
+                        Debug.LogError($"Invalid network endpoint: {ip}:{port}.");
+                    }
                 }
 
                 return endpoint;
@@ -330,8 +333,33 @@ namespace Unity.Netcode.Transports.UTP
             /// <summary>
             /// Endpoint (IP address and port) server will listen/bind on.
             /// </summary>
-            public NetworkEndpoint ListenEndPoint => ParseNetworkEndpoint((ServerListenAddress?.Length == 0) ? Address : ServerListenAddress, Port);
+            public NetworkEndpoint ListenEndPoint
+            {
+                get
+                {
+                    if (string.IsNullOrEmpty(ServerListenAddress))
+                    {
+                        var ep = NetworkEndpoint.LoopbackIpv4;
+
+                        // If an address was entered and it's IPv6, switch to using ::1 as the
+                        // default listen address. (Otherwise we always assume IPv4.)
+                        if (!string.IsNullOrEmpty(Address) && ServerEndPoint.Family == NetworkFamily.Ipv6)
+                        {
+                            ep = NetworkEndpoint.LoopbackIpv6;
+                        }
+
+                        return ep.WithPort(Port);
+                    }
+                    else
+                    {
+                        return ParseNetworkEndpoint(ServerListenAddress, Port);
+                    }
+                }
+            }
+
+            public bool IsIpv6 => !string.IsNullOrEmpty(Address) && ParseNetworkEndpoint(Address, Port, true).Family == NetworkFamily.Ipv6;
         }
+
 
         /// <summary>
         /// The connection (address) data for this <see cref="UnityTransport"/> instance.
@@ -422,6 +450,8 @@ namespace Unity.Netcode.Transports.UTP
 
         internal NetworkManager NetworkManager;
 
+        private IRealTimeProvider m_RealTimeProvider;
+
         /// <summary>
         /// SendQueue dictionary is used to batch events instead of sending them immediately.
         /// </summary>
@@ -506,6 +536,13 @@ namespace Unity.Netcode.Transports.UTP
                 serverEndpoint = ConnectionData.ServerEndPoint;
             }
 
+            // Verify the endpoint is valid before proceeding
+            if (serverEndpoint.Family == NetworkFamily.Invalid)
+            {
+                Debug.LogError($"Target server network address ({ConnectionData.Address}) is {nameof(NetworkFamily.Invalid)}!");
+                return false;
+            }
+
             InitDriver();
 
             var bindEndpoint = serverEndpoint.Family == NetworkFamily.Ipv6 ? NetworkEndpoint.AnyIpv6 : NetworkEndpoint.AnyIpv4;
@@ -524,19 +561,26 @@ namespace Unity.Netcode.Transports.UTP
 
         private bool ServerBindAndListen(NetworkEndpoint endPoint)
         {
+            // Verify the endpoint is valid before proceeding
+            if (endPoint.Family == NetworkFamily.Invalid)
+            {
+                Debug.LogError($"Network listen address ({ConnectionData.Address}) is {nameof(NetworkFamily.Invalid)}!");
+                return false;
+            }
+
             InitDriver();
 
             int result = m_Driver.Bind(endPoint);
             if (result != 0)
             {
-                Debug.LogError("Server failed to bind");
+                Debug.LogError("Server failed to bind. This is usually caused by another process being bound to the same port.");
                 return false;
             }
 
             result = m_Driver.Listen();
             if (result != 0)
             {
-                Debug.LogError("Server failed to listen");
+                Debug.LogError("Server failed to listen.");
                 return false;
             }
 
@@ -609,7 +653,7 @@ namespace Unity.Netcode.Transports.UTP
             {
                 Address = ipv4Address,
                 Port = port,
-                ServerListenAddress = listenAddress ?? string.Empty
+                ServerListenAddress = listenAddress ?? ipv4Address
             };
 
             SetProtocol(ProtocolType.UnityTransport);
@@ -735,6 +779,10 @@ namespace Unity.Netcode.Transports.UTP
         // Send as many batched messages from the queue as possible.
         private void SendBatchedMessages(SendTarget sendTarget, BatchedSendQueue queue)
         {
+            if (!m_Driver.IsCreated)
+            {
+                return;
+            }
             new SendBatchedMessagesJob
             {
                 Driver = m_Driver.ToConcurrent(),
@@ -756,7 +804,7 @@ namespace Unity.Netcode.Transports.UTP
             InvokeOnTransportEvent(NetcodeNetworkEvent.Connect,
                 ParseClientId(connection),
                 default,
-                Time.realtimeSinceStartup);
+                m_RealTimeProvider.RealTimeSinceStartup);
 
             return true;
 
@@ -791,7 +839,7 @@ namespace Unity.Netcode.Transports.UTP
                     break;
                 }
 
-                InvokeOnTransportEvent(NetcodeNetworkEvent.Data, clientId, message, Time.realtimeSinceStartup);
+                InvokeOnTransportEvent(NetcodeNetworkEvent.Data, clientId, message, m_RealTimeProvider.RealTimeSinceStartup);
             }
         }
 
@@ -807,7 +855,7 @@ namespace Unity.Netcode.Transports.UTP
                         InvokeOnTransportEvent(NetcodeNetworkEvent.Connect,
                             clientId,
                             default,
-                            Time.realtimeSinceStartup);
+                            m_RealTimeProvider.RealTimeSinceStartup);
 
                         m_State = State.Connected;
                         return true;
@@ -835,7 +883,7 @@ namespace Unity.Netcode.Transports.UTP
                         InvokeOnTransportEvent(NetcodeNetworkEvent.Disconnect,
                             clientId,
                             default,
-                            Time.realtimeSinceStartup);
+                            m_RealTimeProvider.RealTimeSinceStartup);
 
                         return true;
                     }
@@ -865,7 +913,7 @@ namespace Unity.Netcode.Transports.UTP
                     Debug.LogError("Transport failure! Relay allocation needs to be recreated, and NetworkManager restarted. " +
                         "Use NetworkManager.OnTransportFailure to be notified of such events programmatically.");
 
-                    InvokeOnTransportEvent(NetcodeNetworkEvent.TransportFailure, 0, default, Time.realtimeSinceStartup);
+                    InvokeOnTransportEvent(NetcodeNetworkEvent.TransportFailure, 0, default, m_RealTimeProvider.RealTimeSinceStartup);
                     return;
                 }
 
@@ -905,7 +953,7 @@ namespace Unity.Netcode.Transports.UTP
                     {
                         continue;
                     }
-                    var transportClientId = NetworkManager.ClientIdToTransportId(ngoConnectionId);
+                    var transportClientId = NetworkManager.ConnectionManager.ClientIdToTransportId(ngoConnectionId);
                     ExtractNetworkMetricsForClient(transportClientId);
                 }
             }
@@ -1088,7 +1136,7 @@ namespace Unity.Netcode.Transports.UTP
                     InvokeOnTransportEvent(NetcodeNetworkEvent.Disconnect,
                         m_ServerClientId,
                         default,
-                        Time.realtimeSinceStartup);
+                        m_RealTimeProvider.RealTimeSinceStartup);
                 }
             }
         }
@@ -1129,7 +1177,7 @@ namespace Unity.Netcode.Transports.UTP
 
             if (NetworkManager != null)
             {
-                var transportId = NetworkManager.ClientIdToTransportId(clientId);
+                var transportId = NetworkManager.ConnectionManager.ClientIdToTransportId(clientId);
 
                 var rtt = ExtractRtt(ParseClientId(transportId));
                 if (rtt > 0)
@@ -1151,19 +1199,24 @@ namespace Unity.Netcode.Transports.UTP
 
             NetworkManager = networkManager;
 
+            m_RealTimeProvider = NetworkManager ? NetworkManager.RealTimeProvider : new RealTimeProvider();
+
             m_NetworkSettings = new NetworkSettings(Allocator.Persistent);
 
-#if !UNITY_WEBGL
             // If the user sends a message of exactly m_MaxPayloadSize in length, we need to
             // account for the overhead of its length when we store it in the send queue.
             var fragmentationCapacity = m_MaxPayloadSize + BatchedSendQueue.PerMessageOverhead;
-
             m_NetworkSettings.WithFragmentationStageParameters(payloadCapacity: fragmentationCapacity);
-#if !UTP_TRANSPORT_2_0_ABOVE
+
+            // Bump the reliable window size to its maximum size of 64. Since NGO makes heavy use of
+            // reliable delivery, we're better off with the increased window size compared to the
+            // extra 4 bytes of header that this costs us.
+            m_NetworkSettings.WithReliableStageParameters(windowSize: 64);
+
+#if !UTP_TRANSPORT_2_0_ABOVE && !UNITY_WEBGL
             m_NetworkSettings.WithBaselibNetworkInterfaceParameters(
                 receiveQueueCapacity: m_MaxPacketQueueSize,
                 sendQueueCapacity: m_MaxPacketQueueSize);
-#endif
 #endif
         }
 
@@ -1172,7 +1225,7 @@ namespace Unity.Netcode.Transports.UTP
         /// </summary>
         /// <param name="clientId">The clientId this event is for</param>
         /// <param name="payload">The incoming data payload</param>
-        /// <param name="receiveTime">The time the event was received, as reported by Time.realtimeSinceStartup.</param>
+        /// <param name="receiveTime">The time the event was received, as reported by m_RealTimeProvider.RealTimeSinceStartup.</param>
         /// <returns>Returns the event type</returns>
         public override NetcodeNetworkEvent PollEvent(out ulong clientId, out ArraySegment<byte> payload, out float receiveTime)
         {
@@ -1229,7 +1282,7 @@ namespace Unity.Netcode.Transports.UTP
                     // provide any reliability guarantees anymore. Disconnect the client since at
                     // this point they're bound to become desynchronized.
 
-                    var ngoClientId = NetworkManager?.TransportIdToClientId(clientId) ?? clientId;
+                    var ngoClientId = NetworkManager?.ConnectionManager.TransportIdToClientId(clientId) ?? clientId;
                     Debug.LogError($"Couldn't add payload of size {payload.Count} to reliable send queue. " +
                         $"Closing connection {ngoClientId} as reliability guarantees can't be maintained.");
 
@@ -1245,7 +1298,7 @@ namespace Unity.Netcode.Transports.UTP
                         InvokeOnTransportEvent(NetcodeNetworkEvent.Disconnect,
                             clientId,
                             default(ArraySegment<byte>),
-                            Time.realtimeSinceStartup);
+                            m_RealTimeProvider.RealTimeSinceStartup);
                     }
                 }
                 else
@@ -1393,6 +1446,10 @@ namespace Unity.Netcode.Transports.UTP
         private string m_ClientCaCertificate;
 
         /// <summary>Set the server parameters for encryption.</summary>
+        /// <remarks>
+        /// The public certificate and private key are expected to be in the PEM format, including
+        /// the begin/end markers like <c>-----BEGIN CERTIFICATE-----</c>.
+        /// </remarks>
         /// <param name="serverCertificate">Public certificate for the server (PEM format).</param>
         /// <param name="serverPrivateKey">Private key for the server (PEM format).</param>
         public void SetServerSecrets(string serverCertificate, string serverPrivateKey)
@@ -1403,9 +1460,15 @@ namespace Unity.Netcode.Transports.UTP
 
         /// <summary>Set the client parameters for encryption.</summary>
         /// <remarks>
+        /// <para>
         /// If the CA certificate is not provided, validation will be done against the OS/browser
         /// certificate store. This is what you'd want if using certificates from a known provider.
         /// For self-signed certificates, the CA certificate needs to be provided.
+        /// </para>
+        /// <para>
+        /// The CA certificate (if provided) is expected to be in the PEM format, including the
+        /// begin/end markers like <c>-----BEGIN CERTIFICATE-----</c>.
+        /// </para>
         /// </remarks>
         /// <param name="serverCommonName">Common name of the server (typically hostname).</param>
         /// <param name="caCertificate">CA certificate used to validate the server's authenticity.</param>
@@ -1449,7 +1512,7 @@ namespace Unity.Netcode.Transports.UTP
                 heartbeatTimeoutMS: transport.m_HeartbeatTimeoutMS);
 
 #if UNITY_WEBGL && !UNITY_EDITOR
-            if (NetworkManager.IsServer)
+            if (NetworkManager.IsServer && m_ProtocolType != ProtocolType.RelayUnityTransport)
             {
                 throw new Exception("WebGL as a server is not supported by Unity Transport, outside the Editor.");
             }
@@ -1473,7 +1536,7 @@ namespace Unity.Netcode.Transports.UTP
                 {
                     if (NetworkManager.IsServer)
                     {
-                        if (String.IsNullOrEmpty(m_ServerCertificate) || String.IsNullOrEmpty(m_ServerPrivateKey))
+                        if (string.IsNullOrEmpty(m_ServerCertificate) || string.IsNullOrEmpty(m_ServerPrivateKey))
                         {
                             throw new Exception("In order to use encrypted communications, when hosting, you must set the server certificate and key.");
                         }
@@ -1482,11 +1545,11 @@ namespace Unity.Netcode.Transports.UTP
                     }
                     else
                     {
-                        if (String.IsNullOrEmpty(m_ServerCommonName))
+                        if (string.IsNullOrEmpty(m_ServerCommonName))
                         {
                             throw new Exception("In order to use encrypted communications, clients must set the server common name.");
                         }
-                        else if (String.IsNullOrEmpty(m_ClientCaCertificate))
+                        else if (string.IsNullOrEmpty(m_ClientCaCertificate))
                         {
                             m_NetworkSettings.WithSecureClientParameters(m_ServerCommonName);
                         }

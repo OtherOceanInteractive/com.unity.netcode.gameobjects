@@ -18,6 +18,11 @@ namespace Unity.Netcode
         /// </summary>
         private protected NetworkBehaviour m_NetworkBehaviour;
 
+        public NetworkBehaviour GetBehaviour()
+        {
+            return m_NetworkBehaviour;
+        }
+
         /// <summary>
         /// Initializes the NetworkVariable
         /// </summary>
@@ -89,7 +94,8 @@ namespace Unity.Netcode
                                      "Are you modifying a NetworkVariable before the NetworkObject is spawned?");
                     return;
                 }
-                m_NetworkBehaviour.NetworkManager.MarkNetworkObjectDirty(m_NetworkBehaviour.NetworkObject);
+
+                m_NetworkBehaviour.NetworkManager.BehaviourUpdater.AddForUpdate(m_NetworkBehaviour.NetworkObject);
             }
         }
 

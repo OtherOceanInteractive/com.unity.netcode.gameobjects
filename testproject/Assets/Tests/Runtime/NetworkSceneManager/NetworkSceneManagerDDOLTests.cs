@@ -1,12 +1,12 @@
 using System.Collections;
 using System.Collections.Generic;
-using UnityEngine;
-using UnityEngine.SceneManagement;
-using UnityEngine.TestTools;
 using NUnit.Framework;
 using Unity.Netcode;
 using Unity.Netcode.TestHelpers.Runtime;
 using Unity.Netcode.Transports.UTP;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.TestTools;
 using Object = UnityEngine.Object;
 
 namespace TestProject.RuntimeTests
@@ -35,10 +35,12 @@ namespace TestProject.RuntimeTests
 
             var unityTransport = m_NetworkManagerGameObject.AddComponent<UnityTransport>();
 
+            var prefabs = ScriptableObject.CreateInstance<NetworkPrefabsList>();
+            prefabs.Add(new NetworkPrefab { Prefab = m_DDOL_ObjectToSpawn });
             m_ServerNetworkManager.NetworkConfig = new NetworkConfig()
             {
                 ConnectionApproval = false,
-                NetworkPrefabs = new List<NetworkPrefab>() { new NetworkPrefab() { Prefab = m_DDOL_ObjectToSpawn } },
+                Prefabs = new NetworkPrefabs { NetworkPrefabsLists = new List<NetworkPrefabsList> { prefabs } },
                 NetworkTransport = unityTransport
             };
             m_ServerNetworkManager.StartHost();
