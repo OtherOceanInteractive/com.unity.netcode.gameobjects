@@ -688,9 +688,20 @@ namespace Unity.Netcode
                     m_Hooks[hookIdx].OnAfterSendMessage(clientId, ref message, delivery, tmpSerializer.Length + headerSerializer.Length);
                 }
             }
-
+            #region OOI_CC
+            if (ReportMessage)
+            {
+                OnMessageSent.Invoke(StackTraceUtility.ExtractStackTrace(),
+                    tmpSerializer.Length + headerSerializer.Length, clientIds.Count);
+            }
+            #endregion
             return tmpSerializer.Length + headerSerializer.Length;
         }
+
+        #region OOI_CC
+        internal Action<string, int, int> OnMessageSent = (value1, value2, value3) => { };
+        internal bool ReportMessage;
+        #endregion
 
         internal unsafe int SendPreSerializedMessage<TMessageType>(in FastBufferWriter tmpSerializer, int maxSize, ref TMessageType message, NetworkDelivery delivery, ulong clientId)
             where TMessageType : INetworkMessage
