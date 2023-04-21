@@ -2175,7 +2175,10 @@ namespace Unity.Netcode
                 ret = true;
             }
 
-            networkObject.Observers.Remove(clientId);
+#region OOI_CC
+            if (ret)
+                networkObject.Observers.Remove(clientId);
+#endregion
 
             return ret;
         }
