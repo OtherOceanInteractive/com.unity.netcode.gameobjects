@@ -62,7 +62,20 @@ namespace Unity.Netcode
         }
 
         internal MessagingSystem MessagingSystem { get; private set; }
-
+        #region OOI_CC
+        public void SetMessageSentInternalListener(Action<string, int, int> action)
+        {
+            MessagingSystem.OnMessageSent += action;
+        }
+        public void RemoveMessageSentInternalListener(Action<string, int, int> action)
+        {
+            MessagingSystem.OnMessageSent -= action;
+        }
+        public void EnableMessageSentListener(bool flag)
+        {
+            MessagingSystem.ReportMessage = flag;
+        }
+        #endregion
         private NetworkPrefabHandler m_PrefabHandler;
 
         internal Dictionary<ulong, ConnectionApprovalResponse> ClientsToApprove = new Dictionary<ulong, ConnectionApprovalResponse>();
