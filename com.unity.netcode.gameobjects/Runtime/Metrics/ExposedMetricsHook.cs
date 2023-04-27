@@ -1,41 +1,46 @@
 ﻿using System;
+using UnityEngine;
 
 namespace Unity.Netcode
 {
-    public class ExposedMetricHook
+    public class ExposedMetricsHook
     {
-        public Action<int> BytesSent = (bytes) => { };
-        public Action<int> BytesReceived = (bytes) => { };
+        public static ExposedMetricsHook Instance => s_Instance;
+        public static Action<ExposedMetricsHook> OnMetricsInit = value => {};
 
-        public ExposedMetricHook()
+        public ExposedMetricsHook()
         {
             m_InternalMetricHook = new InternalMetricHook(this);
+            OnMetricsInit.Invoke(this);
         }
 
         public void Hook(Action<int> bytesSent, Action<int> bytesReceived)
         {
             BytesSent += bytesSent;
             BytesReceived += bytesReceived;
-            NetworkManager.OnSingletonReady += () =>
-            {
-                NetworkManager.Singleton.MessagingSystem.Hook(m_InternalMetricHook);
-            };
         }
 
         public void UnHookAll()
         {
             BytesSent = (bytes) => { };
             BytesReceived = (bytes) => { };
-            NetworkManager.Singleton.MessagingSystem.Unhook(m_InternalMetricHook);
+            if (NetworkManager.Singleton != null)
+            {
+                NetworkManager.Singleton.MessagingSystem.Unhook(m_InternalMetricHook);
+            }
         }
 
+        internal InternalMetricHook InternalMetricHook => m_InternalMetricHook;
+        internal Action<int> BytesSent = (bytes) => { };
+        internal Action<int> BytesReceived = (bytes) => { };
+        private static ExposedMetricsHook s_Instance;
         private readonly InternalMetricHook m_InternalMetricHook;
     }
 
     internal class InternalMetricHook : INetworkHooks
     {
-        private ExposedMetricHook m_ExposedMetricHook;
-        public InternalMetricHook(ExposedMetricHook exposedMetricHook)
+        private ExposedMetricsHook m_ExposedMetricHook;
+        public InternalMetricHook(ExposedMetricsHook exposedMetricHook)
         {
             m_ExposedMetricHook = exposedMetricHook;
         }

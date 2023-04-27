@@ -736,6 +736,10 @@ namespace Unity.Netcode
             MessagingSystem.Hook(new ProfilingHooks());
 #endif
 
+            #region OOI_CC
+            MessagingSystem.Hook(new ExposedMetricsHook().InternalMetricHook);
+            #endregion
+
 #if MULTIPLAYER_TOOLS
             MessagingSystem.Hook(new MetricHooks(this));
 #endif
