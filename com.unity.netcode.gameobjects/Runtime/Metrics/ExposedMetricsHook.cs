@@ -14,9 +14,13 @@ namespace Unity.Netcode
             OnMetricsInit.Invoke(this);
         }
 
-        public void Hook(Action<int> bytesSent, Action<int> bytesReceived)
+        public void HookSentBytes(Action<int> bytesSent)
         {
             BytesSent += bytesSent;
+        }
+
+        public void HookReceivedBytes(Action<int> bytesReceived)
+        {
             BytesReceived += bytesReceived;
         }
 
