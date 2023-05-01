@@ -10,6 +10,7 @@ namespace Unity.Netcode
 
         public ExposedMetricsHook()
         {
+            s_Instance = this;
             m_InternalMetricHook = new InternalMetricHook(this);
             OnMetricsInit.Invoke(this);
         }
