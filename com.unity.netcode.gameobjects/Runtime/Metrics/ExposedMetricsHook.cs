@@ -5,41 +5,20 @@ namespace Unity.Netcode
 {
     public class ExposedMetricsHook
     {
-        public static ExposedMetricsHook Instance => s_Instance;
+        public static ExposedMetricsHook Instance => s_instance;
         public static Action<ExposedMetricsHook> OnMetricsInit = value => {};
-
+        public Action<int> OnBytesSent = (bytes) => { };
+        public Action<int> OnBytesReceived = (bytes) => { };
         public ExposedMetricsHook()
         {
-            s_Instance = this;
-            m_InternalMetricHook = new InternalMetricHook(this);
+            s_instance = this;
+            m_internalMetricHook = new InternalMetricHook(this);
             OnMetricsInit.Invoke(this);
         }
 
-        public void HookSentBytes(Action<int> bytesSent)
-        {
-            BytesSent += bytesSent;
-        }
-
-        public void HookReceivedBytes(Action<int> bytesReceived)
-        {
-            BytesReceived += bytesReceived;
-        }
-
-        public void UnHookAll()
-        {
-            BytesSent = (bytes) => { };
-            BytesReceived = (bytes) => { };
-            if (NetworkManager.Singleton != null)
-            {
-                NetworkManager.Singleton.MessagingSystem.Unhook(m_InternalMetricHook);
-            }
-        }
-
-        internal InternalMetricHook InternalMetricHook => m_InternalMetricHook;
-        internal Action<int> BytesSent = (bytes) => { };
-        internal Action<int> BytesReceived = (bytes) => { };
-        private static ExposedMetricsHook s_Instance;
-        private readonly InternalMetricHook m_InternalMetricHook;
+        internal InternalMetricHook InternalMetricHook => m_internalMetricHook;
+        private static ExposedMetricsHook s_instance;
+        private readonly InternalMetricHook m_internalMetricHook;
     }
 
     internal class InternalMetricHook : INetworkHooks
