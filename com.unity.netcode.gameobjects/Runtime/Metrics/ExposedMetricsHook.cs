@@ -53,12 +53,12 @@ namespace Unity.Netcode
 
         public void OnAfterSendBatch(ulong clientId, int messageCount, int batchSizeInBytes, NetworkDelivery delivery)
         {
-            m_ExposedMetricHook.BytesSent.Invoke(batchSizeInBytes);
+            m_ExposedMetricHook.OnBytesSent.Invoke(batchSizeInBytes);
         }
 
         public void OnBeforeReceiveBatch(ulong senderId, int messageCount, int batchSizeInBytes)
         {
-            m_ExposedMetricHook.BytesReceived.Invoke(batchSizeInBytes);
+            m_ExposedMetricHook.OnBytesReceived.Invoke(batchSizeInBytes);
         }
 
         public void OnAfterReceiveBatch(ulong senderId, int messageCount, int batchSizeInBytes)
